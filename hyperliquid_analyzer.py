@@ -626,10 +626,33 @@ class DelayCorrelationAnalyzer:
         - 长期相关系数 > LONG_TERM_CORR_THRESHOLD：长期与BTC有较强跟随性（7d对应5m）
         - 短期相关系数 < SHORT_TERM_CORR_THRESHOLD：短期存在明显滞后（1d对应1m）
         - 差值 > CORR_DIFF_THRESHOLD：短期和长期差异足够显著
+        - 平均Beta系数 >= AVG_BETA_THRESHOLD：波动幅度需满足阈值要求
         
         Returns:
             (is_anomaly, diff_amount, min_short_corr, max_long_corr): 是否异常模式、相关系数差值、短期最小相关系数、长期最大相关系数
         """
+        # ========== Beta 系数检查 ==========
+        # 从 results 中提取所有有效的 beta 值
+        valid_betas = []
+        for result in results:
+            # 处理新旧格式兼容（5个值 vs 4个值）
+            if len(result) == 5:
+                _, _, _, _, beta = result
+                if beta is not None and not np.isnan(beta):
+                    valid_betas.append(beta)
+            elif len(result) == 4:
+                # 旧格式没有 beta，跳过
+                continue
+        
+        # 如果启用了 Beta 计算且有有效的 Beta 值，进行阈值检查
+        if self.ENABLE_BETA_CALCULATION and valid_betas:
+            avg_beta = np.mean(valid_betas)
+            if avg_beta < self.AVG_BETA_THRESHOLD:
+                logger.info(
+                    f"Beta系数不满足要求，过滤 | 平均Beta: {avg_beta:.4f} < {self.AVG_BETA_THRESHOLD}"
+                )
+                return False, 0, 0.0, 0.0
+        
         short_periods = ['1d']
         long_periods = ['7d']
         diff_amount = 0
@@ -708,9 +731,6 @@ class DelayCorrelationAnalyzer:
                 content += f"\n⚠️ 中等波动：平均Beta={avg_beta:.2f}"
             else:
                 content += f"\nBeta系数: {avg_beta:.2f}"
-            if avg_beta < DelayCorrelationAnalyzer.AVG_BETA_THRESHOLD:
-                logger.info(f"Beta系数小于1，不发送飞书通知 | 币种: {coin} | 平均Beta: {avg_beta:.2f}")
-                return
 
         logger.debug(f"详细分析结果:\n{df_results.to_string(index=False)}")
 
