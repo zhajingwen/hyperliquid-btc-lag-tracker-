@@ -91,6 +91,14 @@ class DelayCorrelationAnalyzer:
     # 平均Beta系数阈值，如果小于这个值就不告警
     AVG_BETA_THRESHOLD = 1
     
+    # ========== 新增：Z-score 配置 ==========
+    # 是否启用 Z-score 检查（默认启用）
+    ENABLE_ZSCORE_CHECK = True
+    # Z-score 阈值，超过此值才认为是显著的套利机会
+    ZSCORE_THRESHOLD = 2.0  # 标准差倍数
+    # Z-score 计算的滚动窗口大小
+    ZSCORE_WINDOW = 20  # 建议值：20-30，根据数据频率调整
+    
     def __init__(self, exchange_name="kucoin", timeout=30000, default_combinations=None):
         """
         初始化分析器
@@ -350,6 +358,84 @@ class DelayCorrelationAnalyzer:
         except Exception as e:
             logger.warning(f"Beta 计算异常：{type(e).__name__}: {str(e)}")
             return np.nan
+    
+    @staticmethod
+    def _calculate_zscore(btc_prices: pd.Series, alt_prices: pd.Series, 
+                          beta: float, window: int = 20) -> float | None:
+        """
+        计算价差的 Z-score（用于量化套利机会的信号强度）
+
+        通过构建价差序列（spread = alt_prices - β × btc_prices），
+        计算当前价差相对于历史均值的偏离程度（以标准差为单位）。
+
+        Args:
+            btc_prices: BTC 价格序列（pandas Series）
+            alt_prices: 山寨币价格序列（pandas Series）
+            beta: Beta 系数（用于构建价差）
+            window: 滚动窗口大小（默认 20）
+
+        Returns:
+            float: 当前 Z-score 值
+                - |Z-score| > 2: 显著偏离（强套利信号）
+                - |Z-score| > 1: 中等偏离
+                - |Z-score| < 1: 正常波动范围
+            None: 如果数据不足或计算失败
+
+        Note:
+            - 需要至少 window 个数据点才能计算 Z-score
+            - Beta 系数应该基于价格序列计算（而非收益率）
+            - 如果价差序列的标准差为 0，返回 None
+        """
+        # 1. 数据长度检查
+        if len(btc_prices) != len(alt_prices):
+            logger.warning(f"Z-score 计算失败：BTC 和 ALT 数据长度不一致 | "
+                          f"BTC: {len(btc_prices)}, ALT: {len(alt_prices)}")
+            return None
+
+        # 2. 最小数据点检查
+        if len(btc_prices) < window:
+            logger.debug(f"Z-score 计算失败：数据点不足 | 需要: {window}, 实际: {len(btc_prices)}")
+            return None
+
+        # 3. Beta 有效性检查
+        if np.isnan(beta) or np.isinf(beta) or beta == 0:
+            logger.debug(f"Z-score 计算失败：Beta 系数无效 | Beta: {beta}")
+            return None
+
+        try:
+            # 4. 构建价差序列：spread = alt_prices - β × btc_prices
+            spread = alt_prices - beta * btc_prices
+
+            # 5. 计算滚动均值和标准差
+            spread_mean = spread.rolling(window=window, min_periods=window).mean()
+            spread_std = spread.rolling(window=window, min_periods=window).std()
+
+            # 6. 检查是否有足够的有效数据
+            if pd.isna(spread_mean.iloc[-1]) or pd.isna(spread_std.iloc[-1]):
+                logger.debug("Z-score 计算失败：滚动统计量包含 NaN")
+                return None
+
+            # 7. 检查标准差是否为 0（避免除以 0）
+            if spread_std.iloc[-1] == 0 or np.isnan(spread_std.iloc[-1]):
+                logger.debug("Z-score 计算失败：价差序列标准差为 0 或 NaN")
+                return None
+
+            # 8. 计算当前 Z-score
+            current_spread = spread.iloc[-1]
+            current_mean = spread_mean.iloc[-1]
+            current_std = spread_std.iloc[-1]
+            zscore = (current_spread - current_mean) / current_std
+
+            # 9. 检查结果有效性
+            if np.isnan(zscore) or np.isinf(zscore):
+                logger.debug(f"Z-score 计算失败：结果为 NaN 或 Inf | Z-score: {zscore}")
+                return None
+
+            return float(zscore)
+
+        except Exception as e:
+            logger.warning(f"Z-score 计算异常：{type(e).__name__}: {str(e)}")
+            return None
 
     @staticmethod
     def find_optimal_delay(btc_ret, alt_ret, max_lag=3,
@@ -682,8 +768,16 @@ class DelayCorrelationAnalyzer:
         
         return is_anomaly, diff_amount, min_short_corr, max_long_corr
     
-    def _output_results(self, coin: str, results: list, diff_amount: float):
-        """输出异常模式的分析结果（增强版：包含 Beta 系数）"""
+    def _output_results(self, coin: str, results: list, diff_amount: float, zscore: float | None = None):
+        """
+        输出异常模式的分析结果（增强版：包含 Beta 系数和 Z-score）
+        
+        Args:
+            coin: 币种名称
+            results: 分析结果列表
+            diff_amount: 相关系数差值
+            zscore: Z-score 值（可选）
+        """
         # 构建结果 DataFrame
         data_rows = []
         has_beta = False  # 标记是否有有效的Beta值
@@ -731,6 +825,16 @@ class DelayCorrelationAnalyzer:
                 content += f"\n⚠️ 中等波动：平均Beta={avg_beta:.2f}"
             else:
                 content += f"\nBeta系数: {avg_beta:.2f}"
+        
+        # 如果有 Z-score 信息，添加信号强度提示
+        if zscore is not None:
+            abs_zscore = abs(zscore)
+            if abs_zscore > 3:
+                content += f"\n🔥 强套利信号：Z-score={zscore:.2f}（偏离{abs_zscore:.1f}倍标准差）"
+            elif abs_zscore > 2:
+                content += f"\n📊 中等套利信号：Z-score={zscore:.2f}（偏离{abs_zscore:.1f}倍标准差）"
+            else:
+                content += f"\nZ-score: {zscore:.2f}"
 
         logger.debug(f"详细分析结果:\n{df_results.to_string(index=False)}")
 
@@ -742,7 +846,7 @@ class DelayCorrelationAnalyzer:
     
     def one_coin_analysis(self, coin: str) -> bool:
         """
-        分析单个币种与BTC的相关系数，识别异常模式
+        分析单个币种与BTC的相关系数，识别异常模式（增强版：支持 Z-score 验证）
 
         Args:
             coin: 币种交易对名称，如 "ETH/USDC:USDC"
@@ -752,6 +856,7 @@ class DelayCorrelationAnalyzer:
         """
         results = []
         first_alt_df = None  # 保存第一个组合获取的数据，避免重复调用
+        price_data_cache = {}  # 缓存价格数据，用于 Z-score 计算
 
         # 直接遍历预定义的组合列表：5m/7d 和 1m/1d
         for timeframe, period in self.combinations:
@@ -761,6 +866,18 @@ class DelayCorrelationAnalyzer:
                 # 数据不存在，提前退出所有组合
                 logger.warning(f"币种数据不存在（第一个组合检查无数据），跳过后续所有组合 | 币种: {coin} | {timeframe}/{period}")
                 return False
+            
+            # 缓存价格数据（用于 Z-score 计算）
+            btc_df = self._get_btc_data(timeframe, period)
+            if btc_df is not None:
+                aligned_data = self._align_and_validate_data(btc_df, first_alt_df, coin, timeframe, period)
+                if aligned_data is not None:
+                    btc_aligned, alt_aligned = aligned_data
+                    price_data_cache[(timeframe, period)] = {
+                        'btc_prices': btc_aligned['Close'],
+                        'alt_prices': alt_aligned['Close']
+                    }
+            
             # 使用预获取的数据进行分析，避免重复调用
             result = self._safe_execute(
                 self._analyze_single_combination,
@@ -799,8 +916,58 @@ class DelayCorrelationAnalyzer:
             f"相关系数检测 | 币种: {coin} | 是否异常: {is_anomaly} | 差值: {diff_amount:.4f} | 短期最小: {min_short_corr:.4f} | 长期最大: {max_long_corr:.4f}"
             )
 
+        # ========== Z-score 验证（如果启用且检测到异常）==========
+        zscore_result = None
+        if is_anomaly and self.ENABLE_ZSCORE_CHECK:
+            # 优先使用短期数据（1m/1d）计算 Z-score，因为这是检测异常的主要周期
+            zscore_beta = None
+            
+            # 尝试从短期数据计算 Z-score
+            short_term_key = None
+            for tf, p in self.combinations:
+                if p == '1d':  # 短期周期
+                    short_term_key = (tf, p)
+                    break
+            
+            if short_term_key and short_term_key in price_data_cache:
+                # 从 valid_results 中获取对应的 beta
+                for result in valid_results:
+                    if len(result) >= 5:
+                        corr, tf, p, ts, beta = result
+                        if (tf, p) == short_term_key and beta is not None and not np.isnan(beta):
+                            zscore_beta = beta
+                            break
+                
+                # 如果找到了 beta，计算 Z-score
+                if zscore_beta is not None:
+                    price_data = price_data_cache[short_term_key]
+                    zscore_result = self._calculate_zscore(
+                        price_data['btc_prices'],
+                        price_data['alt_prices'],
+                        zscore_beta,
+                        window=self.ZSCORE_WINDOW
+                    )
+                    
+                    if zscore_result is not None:
+                        abs_zscore = abs(zscore_result)
+                        if abs_zscore < self.ZSCORE_THRESHOLD:
+                            logger.info(
+                                f"Z-score 验证未通过，过滤信号 | 币种: {coin} | "
+                                f"Z-score: {zscore_result:.2f} < {self.ZSCORE_THRESHOLD}"
+                            )
+                            return False
+                        else:
+                            logger.info(
+                                f"Z-score 验证通过 | 币种: {coin} | "
+                                f"Z-score: {zscore_result:.2f} | 信号强度: {'强' if abs_zscore > 3 else '中等'}"
+                            )
+                    else:
+                        logger.debug(f"Z-score 计算失败，跳过验证 | 币种: {coin}")
+            else:
+                logger.debug(f"未找到价格数据，跳过 Z-score 验证 | 币种: {coin}")
+
         if is_anomaly:
-            self._output_results(coin, valid_results, diff_amount)
+            self._output_results(coin, valid_results, diff_amount, zscore=zscore_result)
             return True
         else:
             # 计算相关系数统计信息
