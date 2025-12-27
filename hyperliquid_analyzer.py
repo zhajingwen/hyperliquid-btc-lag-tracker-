@@ -1419,7 +1419,7 @@ class DelayCorrelationAnalyzer:
                         if abs_zscore < self.ZSCORE_THRESHOLD:
                             logger.info(
                                 f"Z-score 验证未通过，过滤信号 | 币种: {coin} | "
-                                f"Z-score: {zscore_result:.2f} < {self.ZSCORE_THRESHOLD} | "
+                                f"Z-score: {zscore_result:.2f}的绝对值 < {self.ZSCORE_THRESHOLD} | "
                                 f"平稳性: {stationarity_level_result.chinese_name if stationarity_level_result else '未知'}"
                             )
                             return False
