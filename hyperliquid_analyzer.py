@@ -600,11 +600,11 @@ class DelayCorrelationAnalyzer:
         beta: float,
         window: int = 20,
         coin: str = None
-    ) -> Tuple[Optional[float], Optional['StationarityLevel']]:
+    ) -> Tuple[Optional[float], Optional['StationarityLevel'], Optional[float]]:
         """
         计算Z-score并返回平稳性等级（增强版）
 
-        此函数是 _calculate_zscore 的增强版本，同时返回Z-score值和平稳性等级，
+        此函数是 _calculate_zscore 的增强版本，同时返回Z-score值、平稳性等级和p-value，
         便于下游逻辑区分强信号和弱信号。
 
         Args:
@@ -615,24 +615,25 @@ class DelayCorrelationAnalyzer:
             coin: 币种名称（用于日志）
 
         Returns:
-            tuple: (zscore, stationarity_level)
+            tuple: (zscore, stationarity_level, p_value)
                 - zscore: Z-score 值（如果计算失败或非平稳则为 None）
                 - stationarity_level: 平稳性等级（如果计算失败则为 None）
+                - p_value: ADF检验的p-value（如果计算失败则为 None）
 
         Note:
-            - 非平稳信号返回 (None, NON_STATIONARY)
-            - 弱平稳信号返回 (zscore值, WEAK)，并在日志中警告
-            - 强平稳信号返回 (zscore值, STRONG)
+            - 非平稳信号返回 (None, NON_STATIONARY, p_value)
+            - 弱平稳信号返回 (zscore值, WEAK, p_value)，并在日志中警告
+            - 强平稳信号返回 (zscore值, STRONG, p_value)
         """
         # 1. 数据验证
         if len(btc_prices) != len(alt_prices):
-            return None, None
+            return None, None, None
 
         if len(btc_prices) < window:
-            return None, None
+            return None, None, None
 
         if np.isnan(beta) or np.isinf(beta) or beta == 0:
-            return None, None
+            return None, None, None
 
         try:
             # 2. 构建对数价差序列
@@ -653,7 +654,7 @@ class DelayCorrelationAnalyzer:
                     f"均值回归假设不成立，不适合配对交易"
                     f"{coin_info}"
                 )
-                return None, stationarity_level
+                return None, stationarity_level, p_value
 
             # 5. 弱平稳：发出警告但继续计算
             if stationarity_level == StationarityLevel.WEAK:
@@ -669,10 +670,10 @@ class DelayCorrelationAnalyzer:
             spread_std = spread.rolling(window=window, min_periods=window).std()
 
             if pd.isna(spread_mean.iloc[-1]) or pd.isna(spread_std.iloc[-1]):
-                return None, stationarity_level
+                return None, stationarity_level, p_value
 
             if spread_std.iloc[-1] == 0 or np.isnan(spread_std.iloc[-1]):
-                return None, stationarity_level
+                return None, stationarity_level, p_value
 
             current_spread = spread.iloc[-1]
             current_mean = spread_mean.iloc[-1]
@@ -680,14 +681,14 @@ class DelayCorrelationAnalyzer:
             zscore = (current_spread - current_mean) / current_std
 
             if np.isnan(zscore) or np.isinf(zscore):
-                return None, stationarity_level
+                return None, stationarity_level, p_value
 
-            return float(zscore), stationarity_level
+            return float(zscore), stationarity_level, p_value
 
         except Exception as e:
             coin_info = f" | 币种: {coin}" if coin else ""
             logger.warning(f"Z-score 计算异常：{type(e).__name__}: {str(e)}{coin_info}")
-            return None, None
+            return None, None, None
 
     @staticmethod
     def _check_spread_stationarity(spread: pd.Series,
@@ -1154,7 +1155,8 @@ class DelayCorrelationAnalyzer:
     
     def _output_results(self, coin: str, results: list, diff_amount: float,
                        zscore: Optional[float] = None,
-                       stationarity_level: Optional['StationarityLevel'] = None):
+                       stationarity_level: Optional['StationarityLevel'] = None,
+                       p_value: Optional[float] = None):
         """
         输出异常模式的分析结果（增强版：包含 Beta 系数、Z-score 和平稳性等级）
 
@@ -1164,6 +1166,7 @@ class DelayCorrelationAnalyzer:
             diff_amount: 相关系数差值
             zscore: Z-score 值（可选）
             stationarity_level: 平稳性等级（可选，用于区分强/弱信号）
+            p_value: ADF检验的p-value（可选）
         """
         # 构建结果 DataFrame
         data_rows = []
@@ -1234,6 +1237,8 @@ class DelayCorrelationAnalyzer:
                 content += f"\n{emoji} {signal_strength}套利信号：Z-score={zscore:.2f}（偏离{abs_zscore:.1f}倍标准差）"
                 content += f"\n📌 交易方向：{direction_desc}"
                 content += f"\n✅ 平稳性：{stationarity_level.chinese_name}（高质量信号）"
+                if p_value is not None:
+                    content += f"\n平稳性检验 p-value: {p_value:.4f} (< 0.05)"
 
             elif stationarity_level == StationarityLevel.WEAK:
                 # 弱平稳：降级为探索性信号
@@ -1243,7 +1248,10 @@ class DelayCorrelationAnalyzer:
                 content += f"\n{emoji} {signal_strength}套利信号：Z-score={zscore:.2f}（偏离{abs_zscore:.1f}倍标准差）"
                 content += f"\n📌 交易方向：{direction_desc}"
                 content += f"\n⚠️ 平稳性：{stationarity_level.chinese_name}（边缘信号，建议谨慎）"
-                content += f"\n💡 提示：平稳性检验 p-value ∈ [0.05, 0.10)，均值回归假设较弱"
+                if p_value is not None:
+                    content += f"\n💡 提示：平稳性检验 p-value: {p_value:.4f} ∈ [0.05, 0.10)，均值回归假设较弱"
+                else:
+                    content += f"\n💡 提示：平稳性检验 p-value ∈ [0.05, 0.10)，均值回归假设较弱"
 
             else:
                 # 平稳性未知（向后兼容）
@@ -1259,6 +1267,15 @@ class DelayCorrelationAnalyzer:
 
                 content += f"\n{emoji} {signal_strength}套利信号：Z-score={zscore:.2f}（偏离{abs_zscore:.1f}倍标准差）"
                 content += f"\n📌 交易方向：{direction_desc}"
+        
+        # 如果没有Z-score但有平稳性检验结果，显示非平稳信息
+        if zscore is None and stationarity_level == StationarityLevel.NON_STATIONARY:
+            content += f"\n❌ 非平稳的特征（平稳性检验失败）"
+            if p_value is not None:
+                content += f"\n平稳性检验 p-value: {p_value:.4f} (>= 0.10)"
+            else:
+                content += f"\n平稳性检验 p-value >= 0.10"
+            content += f"\n均值回归假设不成立，不适合配对交易"
 
         logger.debug(f"详细分析结果:\n{df_results.to_string(index=False)}")
 
@@ -1275,6 +1292,10 @@ class DelayCorrelationAnalyzer:
                     sender(weak_content, self.lark_hook)
                 else:
                     logger.info(f"弱平稳信号仅输出日志，不发送飞书（配置禁用）| 币种: {coin}")
+            elif stationarity_level == StationarityLevel.NON_STATIONARY:
+                # 非平稳：发送告警，明确标注非平稳特征
+                non_stationary_content = f"❌ 非平稳信号告警 ❌\n{content}"
+                sender(non_stationary_content, self.lark_hook)
             else:
                 # 平稳性未知：仍发送（向后兼容）
                 sender(content, self.lark_hook)
@@ -1369,6 +1390,7 @@ class DelayCorrelationAnalyzer:
         # ========== Z-score 验证（如果启用且检测到异常）==========
         zscore_result = None
         stationarity_level_result = None  # 新增：保存平稳性等级
+        p_value_result = None  # 新增：保存p-value
         if self.ENABLE_ZSCORE_CHECK:
             # 优先使用短期数据（1m/1d）计算 Z-score，因为这是检测异常的主要周期
             zscore_beta = None
@@ -1401,8 +1423,8 @@ class DelayCorrelationAnalyzer:
                     )
 
                     if zscore_beta_prices is not None:
-                        # 使用增强版函数，同时获取Z-score和平稳性等级
-                        zscore_result, stationarity_level_result = self._calculate_zscore_with_level(
+                        # 使用增强版函数，同时获取Z-score、平稳性等级和p-value
+                        zscore_result, stationarity_level_result, p_value_result = self._calculate_zscore_with_level(
                             price_data['btc_prices'],
                             price_data['alt_prices'],
                             zscore_beta_prices,  # 使用对数价格 Beta
@@ -1465,7 +1487,7 @@ class DelayCorrelationAnalyzer:
             # ===================================
 
             self._output_results(coin, valid_results, diff_amount, zscore=zscore_result,
-                                stationarity_level=stationarity_level_result)  # 新增参数
+                                stationarity_level=stationarity_level_result, p_value=p_value_result)  # 新增p-value参数
             return True
         else:
             # 计算相关系数统计信息
