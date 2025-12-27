@@ -191,8 +191,10 @@ Beta系数: 1.00
 
 #### 配置参数
 
+Z-score 相关配置位于 `DelayCorrelationAnalyzer` 类中：
+
 ```python
-# Z-score 相关配置
+# Z-score 相关配置（类常量）
 ENABLE_ZSCORE_CHECK = True        # 是否启用 Z-score 检查
 ZSCORE_THRESHOLD = 2.0            # Z-score 阈值，超过此值才触发告警
 ZSCORE_WINDOW = 20                # 滚动窗口大小（建议 20-30）
@@ -202,11 +204,13 @@ ZSCORE_WINDOW = 20                # 滚动窗口大小（建议 20-30）
 
 采用 Winsorization 方法处理极端收益率:
 
-- 下分位数: 0.1%
-- 上分位数: 99.9%
-- 将超出范围的值限制在分位数边界内
+- **下分位数**: 0.1% (`WINSORIZE_LOWER_PERCENTILE = 0.1`)
+- **上分位数**: 99.9% (`WINSORIZE_UPPER_PERCENTILE = 99.9`)
+- **启用开关**: `ENABLE_OUTLIER_TREATMENT = True`
+- **处理方式**: 将超出范围的值限制在分位数边界内（使用 `np.clip`）
+- **数据要求**: 数据点少于 20 个时不进行异常值处理
 
-这种方法可以有效降低极端价格波动对统计分析的影响。
+这种方法可以有效降低极端价格波动对统计分析的影响，提高分析稳健性。
 
 ## 项目结构
 
@@ -238,19 +242,27 @@ hyperliquid-btc-lag-tracker/
 uv sync
 ```
 
-或使用 pip:
+或使用 pip（需要先创建 requirements.txt）:
 ```bash
 pip install -r requirements.txt
 ```
 
+**注意**：项目使用 `pyproject.toml` 管理依赖，推荐使用 `uv` 或 `pip install -e .` 安装。
+
 ### 主要依赖
 
-- **ccxt**: 加密货币交易所 API 统一接口
-- **numpy**: 数值计算
-- **pandas**: 数据分析
-- **matplotlib**: 数据可视化
-- **pyinform**: 信息论分析 (可选)
-- **retry**: 自动重试机制
+**必需依赖**：
+- **ccxt** (>=4.5.14): 加密货币交易所 API 统一接口
+- **numpy** (>=2.3.4): 数值计算
+- **pandas** (>=2.3.3): 数据分析
+- **retry** (>=0.9.2): 自动重试机制
+
+**可选依赖**：
+- **matplotlib** (>=3.10.7): 数据可视化
+- **seaborn** (>=0.13.2): 统计图表绘制
+- **pyinform** (>=0.2.0): 信息论分析
+- **redis** (>=7.1.0): Redis 数据库工具（用于数据缓存）
+- **hyperliquid-python-sdk** (>=0.8.0): Hyperliquid 交易所 Python SDK
 
 ### 环境变量配置
 
@@ -277,10 +289,18 @@ python hyperliquid_analyzer.py
 ```
 
 程序将自动:
-1. 连接 Hyperliquid 交易所
-2. 获取所有 USDC 永续合约交易对
-3. 分析每个币种与 BTC 的相关性
-4. 检测异常模式并通过飞书推送告警
+1. 连接 Hyperliquid 交易所（使用 CCXT 库）
+2. 获取所有 USDC 永续合约交易对（排除 BTC/USDC:USDC）
+3. 分析每个币种与 BTC 的相关性（跨周期 + 延迟优化）
+4. 计算 Beta 系数和 Z-score 进行验证
+5. 检测异常模式并通过飞书推送告警
+6. 输出进度报告（25%、50%、75%、100%）
+7. 生成分析统计（总数、异常数、跳过数、耗时等）
+
+**注意**：
+- 程序会自动跳过数据不足或数据不存在的交易对
+- 每个币种分析间隔 2 秒，避免触发 API 限流
+- 数据下载请求间隔 1.5 秒，确保安全
 
 ## 核心模块说明
 
@@ -292,14 +312,16 @@ python hyperliquid_analyzer.py
 
 ```python
 analyzer = DelayCorrelationAnalyzer(
-    exchange_name="hyperliquid",  # 交易所名称
+    exchange_name="hyperliquid",  # 交易所名称（默认: "kucoin"，但实际使用 "hyperliquid"）
     timeout=30000,                # 请求超时(毫秒)
-    default_combinations=[        # K线组合
+    default_combinations=[        # K线组合（默认: [("5m", "7d"), ("1m", "1d")]）
         ("5m", "7d"),  # 5分钟K线,7天数据
         ("1m", "1d")   # 1分钟K线,1天数据
     ]
 )
 ```
+
+**注意**：代码中 `exchange_name` 的默认值是 `"kucoin"`，但在主程序中使用的是 `"hyperliquid"`。建议显式指定交易所名称。
 
 #### 关键阈值配置
 
@@ -318,22 +340,34 @@ WINSORIZE_UPPER_PERCENTILE = 99.9   # 异常值上限（99.9%分位数）
 
 # ========== 延迟优化配置 ==========
 # 最大延迟搜索范围在 find_optimal_delay() 方法中配置，默认为 3
+
+# ========== Z-score 配置 ==========
+ENABLE_ZSCORE_CHECK = True        # 是否启用 Z-score 检查
+ZSCORE_THRESHOLD = 2.0            # Z-score 阈值，超过此值才触发告警
+ZSCORE_WINDOW = 20                # 滚动窗口大小（建议 20-30）
+
+# ========== 异常值处理配置 ==========
+ENABLE_OUTLIER_TREATMENT = True   # 是否启用异常值处理（Winsorization）
+
+# ========== Beta 系数配置 ==========
+ENABLE_BETA_CALCULATION = True     # 是否计算 Beta 系数
+MIN_POINTS_FOR_BETA_CALC = 10     # Beta 系数计算所需的最小数据点
 ```
 
 ### 数据下载与缓存
 
 ```python
-# 下载历史数据 (带自动重试)
+# 下载历史数据 (带自动重试，最多重试10次)
 df = analyzer.download_ccxt_data(
     symbol="ETH/USDC:USDC",
     period="7d",
     timeframe="5m"
 )
 
-# 获取 BTC 数据 (带缓存)
+# 获取 BTC 数据 (带缓存，避免重复下载)
 btc_df = analyzer._get_btc_data(timeframe="5m", period="7d")
 
-# 获取山寨币数据 (带缓存)
+# 获取山寨币数据 (带缓存，自动验证数据有效性)
 alt_df = analyzer._get_alt_data(
     symbol="ETH/USDC:USDC",
     period="7d",
@@ -342,24 +376,62 @@ alt_df = analyzer._get_alt_data(
 )
 ```
 
+**数据验证机制**：
+- 自动检查数据是否为空
+- 验证数据量是否满足最小要求（默认 50 个数据点）
+- 空数据或数据不足时不缓存，避免后续误用
+
+**支持的 Timeframe 格式**：
+- 分钟：`1m`, `5m`, `15m`, `30m`
+- 小时：`1h`, `4h`, `12h`
+- 天：`1d`, `3d`
+- 周：`1w`
+
+**Period 格式**：
+- 支持天数格式，如 `1d`, `7d`, `30d`
+- 自动转换为对应的 K 线数量
+
 ### 相关性分析
 
 ```python
-# 寻找最优延迟
+# 寻找最优延迟（增强版：支持异常值处理和 Beta 系数计算）
 tau_star, corrs, max_corr, beta = DelayCorrelationAnalyzer.find_optimal_delay(
     btc_ret=btc_returns,    # BTC 收益率数组
     alt_ret=alt_returns,    # 山寨币收益率数组
-    max_lag=3,              # 最大延迟
-    enable_outlier_treatment=True,  # 启用异常值处理
-    enable_beta_calc=True   # 计算 Beta 系数
+    max_lag=3,              # 最大延迟（默认 3）
+    enable_outlier_treatment=True,  # 启用异常值处理（默认使用类常量）
+    enable_beta_calc=True   # 计算 Beta 系数（默认使用类常量）
 )
 
-# 分析单个币种
+# 计算 Z-score（用于量化套利信号强度）
+zscore = DelayCorrelationAnalyzer._calculate_zscore(
+    btc_prices=btc_price_series,  # BTC 价格序列
+    alt_prices=alt_price_series,  # 山寨币价格序列
+    beta=beta_value,              # Beta 系数
+    window=20                     # 滚动窗口大小（默认 20）
+)
+
+# 获取交易方向
+direction_desc, direction_code = DelayCorrelationAnalyzer._get_trading_direction(
+    zscore=zscore_value,
+    coin="ETH/USDC:USDC"
+)
+
+# 分析单个币种（自动进行 Z-score 验证）
 is_anomaly = analyzer.one_coin_analysis("ETH/USDC:USDC")
 
-# 批量分析所有币种
+# 批量分析所有币种（带进度报告）
 analyzer.run()
 ```
+
+**错误处理机制**：
+- `_safe_execute()`: 统一错误处理，捕获异常并记录日志
+- `_safe_download()`: 安全下载数据，失败时返回 None 而不抛出异常
+- 自动重试机制：`download_ccxt_data()` 使用 `@retry` 装饰器，最多重试 10 次
+
+**进度报告**：
+- 在 25%、50%、75%、100% 进度时自动输出日志
+- 显示已处理币种数、总币种数和百分比
 
 ## 输出示例
 
@@ -369,10 +441,17 @@ analyzer.run()
 2025-12-25 18:00:00 - __main__ - INFO - 启动分析器 | 交易所: hyperliquid | K线组合: [('5m', '7d'), ('1m', '1d')]
 2025-12-25 18:00:05 - __main__ - INFO - 发现 150 个 USDC 永续合约交易对
 2025-12-25 18:05:30 - __main__ - INFO - 发现异常币种 | 交易所: hyperliquid | 币种: DOGE/USDC:USDC | 差值: 0.42
-2025-12-25 18:05:30 - __main__ - INFO - 分析进度: 37/150 (24%)
+2025-12-25 18:10:00 - __main__ - INFO - 分析进度: 38/150 (25%)
+2025-12-25 18:20:00 - __main__ - INFO - 分析进度: 75/150 (50%)
+2025-12-25 18:30:00 - __main__ - INFO - 分析进度: 113/150 (75%)
 ...
 2025-12-25 18:30:00 - __main__ - INFO - 分析完成 | 交易所: hyperliquid | 总数: 150 | 异常: 8 | 跳过: 12 | 耗时: 1800.5s | 平均: 12.00s/币种
 ```
+
+**进度报告机制**：
+- 自动在 25%、50%、75%、100% 进度时输出日志
+- 显示当前处理的币种数和总币种数
+- 便于监控长时间运行的批量分析任务
 
 ### 飞书告警通知
 
@@ -635,34 +714,74 @@ AVG_BETA_THRESHOLD = 0.8          # 接受较低波动性
 可以根据交易频率调整 K线组合:
 
 ```python
-# 高频交易
-combinations = [("1m", "1d"), ("5m", "3d")]
+# 高频交易（默认配置）
+combinations = [("5m", "7d"), ("1m", "1d")]
 
 # 中长线交易
 combinations = [("15m", "14d"), ("1h", "30d")]
 
 # 超短线交易
 combinations = [("1m", "6h"), ("5m", "1d")]
+
+# 自定义组合（在初始化时指定）
+analyzer = DelayCorrelationAnalyzer(
+    exchange_name="hyperliquid",
+    default_combinations=[("15m", "14d"), ("1h", "30d")]
+)
 ```
+
+**支持的 Timeframe 格式**：
+- 分钟：`1m`, `5m`, `15m`, `30m`
+- 小时：`1h`, `4h`, `12h`
+- 天：`1d`, `3d`
+- 周：`1w`
+
+**Period 格式**：
+- 支持天数格式，如 `1d`, `7d`, `30d`
+- 系统会自动将 period 和 timeframe 转换为对应的 K 线数量
 
 ## 性能优化
 
 ### 缓存机制
 
 - **BTC 数据缓存**: 避免重复下载相同周期的 BTC 数据
+  - 缓存键：`(timeframe, period)`
+  - 同一周期内所有币种共享 BTC 数据
 - **山寨币数据缓存**: 缓存已下载的山寨币数据
+  - 缓存键：`(symbol, timeframe, period)`
+  - 自动验证缓存数据的有效性（非空且数据量足够）
+  - 空数据或数据不足时不缓存，避免后续误用
+- **缓存策略**: 
+  - 仅在数据验证通过后才缓存
+  - 缓存的是 DataFrame 的副本，避免意外修改
 
 ### 限流控制
 
-- **请求间隔**: 1.5秒 (避免触发 Hyperliquid 限流)
-- **币种间隔**: 2秒
-- **启用速率限制**: `enableRateLimit=True`
+- **请求间隔**: 1.5秒（在 `download_ccxt_data()` 中，避免触发 Hyperliquid 限流）
+- **币种间隔**: 2秒（在 `run()` 方法中，每个币种分析后等待）
+- **启用速率限制**: `enableRateLimit=True`（CCXT 交易所配置）
+- **速率限制值**: `rateLimit=1500`（毫秒，即 1.5 秒）
+- **请求超时**: `timeout=30000`（30 秒）
 
 ### 数据验证
 
-- **最小数据点**: 50 个数据点才进行分析
-- **相关系数计算**: 至少需要 10 个数据点
-- **Beta 系数计算**: 至少需要 10 个数据点
+- **最小数据点**: 50 个数据点才进行分析（`MIN_DATA_POINTS_FOR_ANALYSIS`）
+- **相关系数计算**: 至少需要 10 个数据点（`MIN_POINTS_FOR_CORR_CALC`）
+- **Beta 系数计算**: 至少需要 10 个数据点（`MIN_POINTS_FOR_BETA_CALC`）
+- **Z-score 计算**: 至少需要窗口大小（默认 20）个数据点
+- **空数据检查**: 自动检测并跳过空数据或数据不足的交易对
+- **数据对齐**: 自动对齐 BTC 和山寨币的时间索引，确保数据一致性
+
+### 错误处理
+
+- **自动重试**: `download_ccxt_data()` 使用 `@retry` 装饰器
+  - 最多重试 10 次 (`tries=10`)
+  - 初始延迟 5 秒 (`delay=5`)
+  - 指数退避策略 (`backoff=2`)
+  - 所有重试都会记录到日志
+- **安全执行**: `_safe_execute()` 统一捕获异常，避免程序崩溃
+- **安全下载**: `_safe_download()` 失败时返回 None 而不抛出异常
+- **日志记录**: 所有错误都会记录到日志文件，便于排查问题
 
 ## 风险提示
 
