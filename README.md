@@ -123,6 +123,81 @@ Beta 系数用于衡量山寨币收益率相对 BTC 的跟随幅度:
 
 项目设定 Beta 阈值为 1.0,低于此值的币种不会触发告警。
 
+### Z-score（标准分数）
+
+Z-score 是统计套利策略中的核心指标，用于量化当前价差相对于历史均值的偏离程度，从而判断套利机会的信号强度和交易方向。
+
+#### 基本概念
+
+Z-score 通过构建价差序列并计算其标准化偏离来衡量套利信号：
+
+```
+价差序列: spread = alt_prices - β × btc_prices
+Z-score = (当前价差 - 历史均值) / 历史标准差
+```
+
+其中：
+- **alt_prices**: 山寨币价格序列
+- **btc_prices**: BTC 价格序列
+- **β**: Beta 系数（用于构建对冲价差）
+- **历史均值/标准差**: 基于滚动窗口（默认 20 个数据点）计算
+
+#### Z-score 的含义
+
+Z-score 表示当前价差偏离历史均值的标准差倍数：
+
+| Z-score 范围 | 含义 | 套利信号强度 |
+|-------------|------|------------|
+| \|Z\| > 3 | 极强偏离 | 强套利信号 |
+| 2 < \|Z\| ≤ 3 | 显著偏离 | 中等套利信号 |
+| 1 < \|Z\| ≤ 2 | 中等偏离 | 弱套利信号 |
+| \|Z\| ≤ 1 | 正常波动 | 无套利信号 |
+
+#### 交易方向判断
+
+Z-score 的正负值直接指示交易方向：
+
+- **Z-score > 0（正数）**：
+  - 含义：当前价差高于历史均值，山寨币相对 BTC 偏高
+  - 预期：价差会回归均值，山寨币相对 BTC 会下跌
+  - **交易方向**：做空山寨币 / 做多 BTC
+
+- **Z-score < 0（负数）**：
+  - 含义：当前价差低于历史均值，山寨币相对 BTC 偏低
+  - 预期：价差会回归均值，山寨币相对 BTC 会上涨
+  - **交易方向**：做多山寨币 / 做空 BTC
+
+#### 实际应用示例
+
+假设收到以下告警：
+
+```
+AR/USDC:USDC 相关系数分析结果
+相关系数 时间周期 数据周期  最优延迟   Beta系数 
+0.651925   5m   7d     0 1.344139 
+0.336622   1m   1d     1 0.664220 
+
+差值: 0.32
+Beta系数: 1.00
+📊 中等套利信号：Z-score=2.41（偏离2.4倍标准差）
+📌 交易方向：做空AR/做多BTC
+```
+
+**解读**：
+- Z-score = 2.41（正数），表示当前价差偏高
+- 偏离历史均值 2.4 个标准差，属于显著偏离
+- 预期价差会回归，AR 相对 BTC 会下跌
+- 交易策略：做空 AR，同时做多 BTC（构建市场中性组合）
+
+#### 配置参数
+
+```python
+# Z-score 相关配置
+ENABLE_ZSCORE_CHECK = True        # 是否启用 Z-score 检查
+ZSCORE_THRESHOLD = 2.0            # Z-score 阈值，超过此值才触发告警
+ZSCORE_WINDOW = 20                # 滚动窗口大小（建议 20-30）
+```
+
 ### 异常值处理
 
 采用 Winsorization 方法处理极端收益率:
@@ -311,7 +386,185 @@ DOGE/USDC:USDC 相关系数分析结果
 
 差值: 0.43
 ⚠️ 中等波动：平均Beta=1.32
+📊 中等套利信号：Z-score=2.41（偏离2.4倍标准差）
+📌 交易方向：做空DOGE/做多BTC
 ```
+
+## 自动化交易实现
+
+基于 Z-score 的套利信号，可以实现自动化配对交易系统。本节介绍如何将分析结果转化为可执行的交易策略。
+
+### 交易信号生成
+
+当收到告警时，系统会提供以下关键信息：
+
+1. **Z-score 值**：量化价差偏离程度
+2. **交易方向**：根据 Z-score 正负值确定
+3. **Beta 系数**：用于计算对冲比例
+4. **信号强度**：强/中等/弱
+
+### 交易方向判断逻辑
+
+```python
+# 价差公式
+spread = alt_prices - beta * btc_prices
+
+# Z-score 判断
+if zscore > 0:  # 价差偏高
+    # 做空 AR，做多 BTC（价差会缩小）
+    signal = "做空AR/做多BTC"
+    
+elif zscore < 0:  # 价差偏低
+    # 做多 AR，做空 BTC（价差会扩大）
+    signal = "做多AR/做空BTC"
+```
+
+### 仓位计算（对冲比例）
+
+基于 Beta 系数计算对冲仓位：
+
+```python
+# 方案1：等价值对冲（推荐，简单易行）
+alt_position_value = available_capital / 2  # 一半资金做空 AR
+btc_position_value = available_capital / 2  # 一半资金做多 BTC
+
+# 方案2：Beta 加权对冲（更精确，考虑波动性）
+alt_position_value = available_capital / (1 + beta)
+btc_position_value = available_capital * beta / (1 + beta)
+```
+
+**示例**：
+- 账户余额：10,000 USDC
+- 单笔风险：2%（200 USDC）
+- Beta = 1.0
+- AR 价格：3 USDC
+- BTC 价格：50,000 USDC
+
+**等价值对冲**：
+- 做空 AR：100 USDC / 3 = 33.33 个 AR
+- 做多 BTC：100 USDC / 50,000 = 0.002 个 BTC
+
+### 交易执行流程
+
+#### 1. 开仓（Entry）
+
+当 Z-score 达到阈值时（|Z| ≥ 2.0）：
+
+```python
+# 1. 生成交易信号
+signal = generate_trading_signal(coin, zscore, beta)
+
+# 2. 计算仓位大小
+position = calculate_position_size(signal, account_balance, risk_per_trade=0.02)
+
+# 3. 同时执行两个订单（尽量同步）
+if signal['direction'] == 'short_alt_long_btc':
+    # 做空 AR（开空仓）
+    alt_order = exchange.create_market_sell_order('AR/USDC:USDC', alt_size)
+    # 做多 BTC（开多仓）
+    btc_order = exchange.create_market_buy_order('BTC/USDC:USDC', btc_size)
+```
+
+#### 2. 监控（Monitoring）
+
+持续监控 Z-score 变化：
+
+```python
+while position_is_open:
+    current_zscore = get_current_zscore(coin)
+    
+    # 检查退出条件
+    should_exit, reason = check_exit_signal(current_zscore, entry_zscore)
+    
+    if should_exit:
+        close_position(position, reason)
+        break
+    
+    time.sleep(60)  # 每分钟检查一次
+```
+
+#### 3. 平仓（Exit）
+
+退出条件：
+
+| 条件 | 说明 | 策略 |
+|------|------|------|
+| **止盈** | Z-score 回归到 0 附近（\|Z\| < 0.5） | 价差回归，获利了结 |
+| **止损** | Z-score 继续扩大（\|Z\| > 4.0） | 价差未回归，及时止损 |
+| **反向信号** | Z-score 符号改变 | 市场方向反转 |
+| **时间止损** | 持仓超过最大时间（如 24 小时） | 避免长期持仓风险 |
+
+### 风险控制参数
+
+建议的风险控制配置：
+
+```python
+RISK_PARAMS = {
+    'max_position_size': 0.02,      # 单笔交易最大 2% 资金
+    'max_total_exposure': 0.10,    # 总敞口不超过 10%
+    'stop_loss_zscore': 4.0,       # 止损 Z-score
+    'take_profit_zscore': 0.5,     # 止盈 Z-score
+    'max_holding_time': 24,         # 最大持仓时间（小时）
+    'min_zscore_for_entry': 2.0,    # 最小 Z-score 才开仓
+}
+```
+
+### 完整交易流程示例
+
+```python
+# 1. 收到告警
+alert = {
+    'coin': 'AR/USDC:USDC',
+    'zscore': 2.41,
+    'beta': 1.00
+}
+
+# 2. 生成交易信号
+signal = generate_trading_signal(
+    alert['coin'], 
+    alert['zscore'], 
+    alert['beta']
+)
+# signal = {
+#     'direction': 'short_alt_long_btc',
+#     'alt_action': 'SELL',
+#     'btc_action': 'BUY'
+# }
+
+# 3. 计算仓位
+position = calculate_position_size(
+    signal, 
+    account_balance=10000, 
+    risk_per_trade=0.02
+)
+
+# 4. 执行交易
+result = execute_pair_trade(position)
+
+# 5. 持续监控，等待平仓信号
+while True:
+    should_exit, reason = check_exit_signal(position)
+    if should_exit:
+        close_position(position, reason)
+        break
+    time.sleep(60)  # 每分钟检查一次
+```
+
+### 注意事项
+
+1. **滑点控制**：使用限价单而非市价单，减少滑点损失
+2. **手续费考虑**：计算收益时需扣除交易成本
+3. **流动性检查**：确保两个交易对都有足够流动性
+4. **同步执行**：尽量同时下单，减少价格变动风险
+5. **持续监控**：实时跟踪 Z-score，及时调整或平仓
+6. **市场中性**：通过做多/做空组合，降低市场整体波动风险
+
+### 策略优势
+
+- **市场中性**：通过配对交易，降低市场整体风险
+- **统计优势**：基于均值回归理论，具有统计学基础
+- **自动化**：可完全自动化执行，减少人工干预
+- **风险可控**：通过 Z-score 阈值和止损机制控制风险
 
 ## 定时调度
 
