@@ -1200,11 +1200,11 @@ class DelayCorrelationAnalyzer:
 
         df_results = pd.DataFrame(data_rows)
 
-        logger.info(f"发现异常币种 | 交易所: {self.exchange_name} | 币种: {coin} | 差值: {diff_amount:.2f}")
+        logger.info(f"发现异常币种 | 交易所: {self.exchange_name} | 币种: {coin} | 相关系数差值: {diff_amount:.2f}")
 
         # 飞书消息内容
         content = f"{self.exchange_name}\n\n{coin} 相关系数分析结果\n{df_results.to_string(index=False)}\n"
-        content += f"\n差值: {diff_amount:.2f}"
+        content += f"\n相关系数差值: {diff_amount:.2f}"
 
         # 如果有Beta信息，添加风险提示
         if has_beta:
@@ -1384,7 +1384,7 @@ class DelayCorrelationAnalyzer:
 
         is_anomaly, diff_amount, min_short_corr, max_long_corr = self._detect_anomaly_pattern(valid_results, coin=coin)
         logger.info(
-            f"相关系数检测 | 币种: {coin} | 是否异常: {is_anomaly} | 差值: {diff_amount:.4f} | 短期最小: {min_short_corr:.4f} | 长期最大: {max_long_corr:.4f}"
+            f"相关系数检测 | 币种: {coin} | 是否异常: {is_anomaly} | 相关系数差值: {diff_amount:.4f} | 短期最小: {min_short_corr:.4f} | 长期最大: {max_long_corr:.4f}"
             )
 
         # ========== Z-score 验证（如果启用且检测到异常）==========
