@@ -438,6 +438,31 @@ class DelayCorrelationAnalyzer:
             return None
 
     @staticmethod
+    def _get_trading_direction(zscore: float, coin: str) -> tuple[str, str]:
+        """
+        根据 Z-score 获取交易方向
+        
+        Args:
+            zscore: Z-score 值（可正可负）
+            coin: 币种名称（如 "AR/USDC:USDC"）
+        
+        Returns:
+            tuple: (方向描述, 方向代码)
+                - 方向描述: "做空AR/做多BTC" 或 "做多AR/做空BTC"
+                - 方向代码: "short_alt_long_btc" 或 "long_alt_short_btc"
+        """
+        if zscore > 0:
+            # 价差偏高，预期回归 → 做空山寨币，做多 BTC
+            coin_symbol = coin.split('/')[0]  # 提取币种符号，如 "AR"
+            return f"做空{coin_symbol}/做多BTC", "short_alt_long_btc"
+        elif zscore < 0:
+            # 价差偏低，预期回归 → 做多山寨币，做空 BTC
+            coin_symbol = coin.split('/')[0]
+            return f"做多{coin_symbol}/做空BTC", "long_alt_short_btc"
+        else:
+            return "无方向（Z-score=0）", "neutral"
+
+    @staticmethod
     def find_optimal_delay(btc_ret, alt_ret, max_lag=3,
                            enable_outlier_treatment=None,
                            enable_beta_calc=None):
@@ -829,12 +854,21 @@ class DelayCorrelationAnalyzer:
         # 如果有 Z-score 信息，添加信号强度提示
         if zscore is not None:
             abs_zscore = abs(zscore)
+            direction_desc, direction_code = self._get_trading_direction(zscore, coin)
+            
+            # 信号强度判断
             if abs_zscore > 3:
-                content += f"\n🔥 强套利信号：Z-score={zscore:.2f}（偏离{abs_zscore:.1f}倍标准差）"
+                signal_strength = "强"
+                emoji = "🔥"
             elif abs_zscore > 2:
-                content += f"\n📊 中等套利信号：Z-score={zscore:.2f}（偏离{abs_zscore:.1f}倍标准差）"
+                signal_strength = "中等"
+                emoji = "📊"
             else:
-                content += f"\nZ-score: {zscore:.2f}"
+                signal_strength = "弱"
+                emoji = "📈" if zscore > 0 else "📉"
+            
+            content += f"\n{emoji} {signal_strength}套利信号：Z-score={zscore:.2f}（偏离{abs_zscore:.1f}倍标准差）"
+            content += f"\n📌 交易方向：{direction_desc}"
 
         logger.debug(f"详细分析结果:\n{df_results.to_string(index=False)}")
 
@@ -957,9 +991,11 @@ class DelayCorrelationAnalyzer:
                             )
                             return False
                         else:
+                            direction_desc, direction_code = self._get_trading_direction(zscore_result, coin)
+                            signal_strength = '强' if abs_zscore > 3 else '中等'
                             logger.info(
                                 f"Z-score 验证通过 | 币种: {coin} | "
-                                f"Z-score: {zscore_result:.2f} | 信号强度: {'强' if abs_zscore > 3 else '中等'}"
+                                f"Z-score: {zscore_result:.2f} | 方向: {direction_desc} | 信号强度: {signal_strength}"
                             )
                     else:
                         logger.debug(f"Z-score 计算失败，跳过验证 | 币种: {coin}")
