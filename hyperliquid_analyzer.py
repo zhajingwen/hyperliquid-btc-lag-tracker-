@@ -918,7 +918,7 @@ class DelayCorrelationAnalyzer:
 
         # ========== Z-score 验证（如果启用且检测到异常）==========
         zscore_result = None
-        if is_anomaly and self.ENABLE_ZSCORE_CHECK:
+        if self.ENABLE_ZSCORE_CHECK:
             # 优先使用短期数据（1m/1d）计算 Z-score，因为这是检测异常的主要周期
             zscore_beta = None
             
