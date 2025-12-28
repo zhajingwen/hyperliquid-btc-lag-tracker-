@@ -1498,7 +1498,6 @@ class DelayCorrelationAnalyzer:
         p_value_result = None  # 新增：保存p-value
         if self.ENABLE_ZSCORE_CHECK:
             # 优先使用短期数据（1m/1d）计算 Z-score，因为这是检测异常的主要周期
-            zscore_beta = None
             
             # 尝试从短期数据计算 Z-score
             short_term_key = None
@@ -1508,76 +1507,66 @@ class DelayCorrelationAnalyzer:
                     break
             
             if short_term_key and short_term_key in price_data_cache:
-                # 从 valid_results 中获取对应的 beta
-                for result in valid_results:
-                    if len(result) >= 5:
-                        corr, tf, p, ts, beta = result
-                        if (tf, p) == short_term_key and beta is not None and not np.isnan(beta):
-                            zscore_beta = beta
-                            break
-                
-                # 如果找到了 beta，计算 Z-score
-                if zscore_beta is not None:
-                    price_data = price_data_cache[short_term_key]
+                price_data = price_data_cache[short_term_key]
 
-                    # ⚠️ 关键修改：使用对数价格计算 Beta（而非收益率 Beta）
-                    zscore_beta_prices = self._calculate_beta_from_prices(
+                # 使用对数价格计算 Beta（用于构建价差序列）
+                zscore_beta_prices = self._calculate_beta_from_prices(
+                    price_data['btc_prices'],
+                    price_data['alt_prices'],
+                    coin=coin
+                )
+
+                if zscore_beta_prices is not None:
+                    # 使用增强版函数，同时获取Z-score、平稳性等级和p-value
+                    zscore_result, stationarity_level_result, p_value_result = self._calculate_zscore_with_level(
                         price_data['btc_prices'],
                         price_data['alt_prices'],
+                        zscore_beta_prices,  # 使用对数价格 Beta
+                        window=self.ZSCORE_WINDOW,
                         coin=coin
                     )
+                else:
+                    logger.debug(f"Z-score 计算跳过：对数价格 Beta 计算失败 | 币种: {coin}")
+                
+                if zscore_result is not None:
+                    abs_zscore = abs(zscore_result)
 
-                    if zscore_beta_prices is not None:
-                        # 使用增强版函数，同时获取Z-score、平稳性等级和p-value
-                        zscore_result, stationarity_level_result, p_value_result = self._calculate_zscore_with_level(
-                            price_data['btc_prices'],
-                            price_data['alt_prices'],
-                            zscore_beta_prices,  # 使用对数价格 Beta
-                            window=self.ZSCORE_WINDOW,
-                            coin=coin
+                    # Z-score 阈值验证
+                    if abs_zscore < self.ZSCORE_THRESHOLD:
+                        logger.info(
+                            f"Z-score 验证未通过，过滤信号 | 币种: {coin} | "
+                            f"Z-score: {zscore_result:.2f}的绝对值 < {self.ZSCORE_THRESHOLD} | "
+                            f"平稳性: {stationarity_level_result.chinese_name if stationarity_level_result else '未知'}"
                         )
+                        return False
                     else:
-                        logger.debug(f"Z-score 计算跳过：对数价格 Beta 计算失败 | 币种: {coin}")
-                    
-                    if zscore_result is not None:
-                        abs_zscore = abs(zscore_result)
+                        direction_desc, direction_code = self._get_trading_direction(zscore_result, coin)
 
-                        # Z-score 阈值验证
-                        if abs_zscore < self.ZSCORE_THRESHOLD:
+                        # 根据平稳性等级输出不同强度的日志
+                        if stationarity_level_result == StationarityLevel.STRONG:
+                            signal_strength = '强(高质量)' if abs_zscore > 3 else '中等(可靠)'
                             logger.info(
-                                f"Z-score 验证未通过，过滤信号 | 币种: {coin} | "
-                                f"Z-score: {zscore_result:.2f}的绝对值 < {self.ZSCORE_THRESHOLD} | "
-                                f"平稳性: {stationarity_level_result.chinese_name if stationarity_level_result else '未知'}"
+                                f"Z-score 验证通过（强平稳）| 币种: {coin} | "
+                                f"Z-score: {zscore_result:.2f} | 平稳性: {stationarity_level_result.chinese_name} | "
+                                f"方向: {direction_desc} | 信号强度: {signal_strength}"
                             )
-                            return False
+                        elif stationarity_level_result == StationarityLevel.WEAK:
+                            signal_strength = '弱(探索性)'
+                            logger.warning(
+                                f"Z-score 验证通过（弱平稳警告）| 币种: {coin} | "
+                                f"Z-score: {zscore_result:.2f} | 平稳性: {stationarity_level_result.chinese_name} | "
+                                f"方向: {direction_desc} | 信号强度: {signal_strength} | "
+                                f"⚠️ 建议谨慎交易，平稳性检验处于边缘区域"
+                            )
                         else:
-                            direction_desc, direction_code = self._get_trading_direction(zscore_result, coin)
-
-                            # 根据平稳性等级输出不同强度的日志
-                            if stationarity_level_result == StationarityLevel.STRONG:
-                                signal_strength = '强(高质量)' if abs_zscore > 3 else '中等(可靠)'
-                                logger.info(
-                                    f"Z-score 验证通过（强平稳）| 币种: {coin} | "
-                                    f"Z-score: {zscore_result:.2f} | 平稳性: {stationarity_level_result.chinese_name} | "
-                                    f"方向: {direction_desc} | 信号强度: {signal_strength}"
-                                )
-                            elif stationarity_level_result == StationarityLevel.WEAK:
-                                signal_strength = '弱(探索性)'
-                                logger.warning(
-                                    f"Z-score 验证通过（弱平稳警告）| 币种: {coin} | "
-                                    f"Z-score: {zscore_result:.2f} | 平稳性: {stationarity_level_result.chinese_name} | "
-                                    f"方向: {direction_desc} | 信号强度: {signal_strength} | "
-                                    f"⚠️ 建议谨慎交易，平稳性检验处于边缘区域"
-                                )
-                            else:
-                                # 理论上不应出现（因为_calculate_zscore_with_level已过滤非平稳）
-                                signal_strength = '未知'
-                                logger.warning(
-                                    f"Z-score 验证异常（平稳性未知）| 币种: {coin} | "
-                                    f"Z-score: {zscore_result:.2f} | 平稳性: 未知"
-                                )
-                    else:
-                        logger.debug(f"Z-score 计算失败，跳过验证 | 币种: {coin}")
+                            # 理论上不应出现（因为_calculate_zscore_with_level已过滤非平稳）
+                            signal_strength = '未知'
+                            logger.warning(
+                                f"Z-score 验证异常（平稳性未知）| 币种: {coin} | "
+                                f"Z-score: {zscore_result:.2f} | 平稳性: 未知"
+                            )
+                else:
+                    logger.debug(f"Z-score 计算失败，跳过验证 | 币种: {coin}")
             else:
                 logger.debug(f"未找到价格数据，跳过 Z-score 验证 | 币种: {coin}")
 
