@@ -667,12 +667,13 @@ class DelayCorrelationAnalyzer:
 
         Note:
             - 使用对数价差符合协整理论
-            - 统计计算基于最近 window 期数据，确保时间一致性：
+            - 统计计算基于最近 window 期数据，确保时间一致性和统计严谨性：
               1. 取最近 window 期数据
-              2. 计算该窗口的 Beta 系数
-              3. 构建该窗口的价差序列
-              4. 计算该窗口的均值和标准差
-              5. 计算当前时刻的 Z-score
+              2. 基于前 window-1 期数据计算 Beta 系数（避免循环依赖）
+              3. 使用该Beta构建整个window的价差序列
+              4. 基于前 window-1 期价差计算均值和标准差（避免样本偏差）
+              5. 使用最后一个点的价差计算当前时刻的 Z-score
+            - Beta计算排除最后一个点，避免look-ahead bias，确保统计严谨性
             - 对数价差具有比例缩放不变性
             - 如果价差序列非平稳，返回 None（均值回归假设不成立）
         """
@@ -695,16 +696,19 @@ class DelayCorrelationAnalyzer:
             recent_btc = btc_prices.iloc[-window:]
             recent_alt = alt_prices.iloc[-window:]
 
-            # 4. 计算 Beta（基于这 window 期数据）
+            # 4. 计算 Beta（修复循环依赖：基于前 window-1 期数据，排除最后一个点）
+            # 避免使用最后一个点的价格信息计算Beta，再用该Beta构建最后一个点的价差
+            beta_btc = recent_btc.iloc[:-1]
+            beta_alt = recent_alt.iloc[:-1]
             rolling_beta = DelayCorrelationAnalyzer._calculate_rolling_beta_from_prices(
-                recent_btc, recent_alt, window=window, coin=coin
+                beta_btc, beta_alt, window=window-1, coin=coin
             )
             if rolling_beta is None:
                 coin_info = f" | 币种: {coin}" if coin else ""
                 logger.debug(f"Z-score 计算失败：滚动窗口 Beta 计算失败{coin_info}")
                 return None
 
-            # 5. 构建对数价差序列（修复：仅计算当前窗口的价差）
+            # 5. 构建对数价差序列（使用基于历史数据计算的Beta构建整个window的价差序列）
             log_btc = np.log(recent_btc)
             log_alt = np.log(recent_alt)
             spread = log_alt - rolling_beta * log_btc
@@ -793,7 +797,9 @@ class DelayCorrelationAnalyzer:
                 - p_value: ADF检验的p-value（如果计算失败则为 None）
 
         Note:
-            - 统计计算基于最近 window 期数据，确保时间一致性
+            - 统计计算基于最近 window 期数据，确保时间一致性和统计严谨性
+            - Beta计算基于前 window-1 期数据，避免循环依赖（look-ahead bias）
+            - 均值和标准差基于前 window-1 期价差，避免样本偏差
             - 非平稳信号返回 (None, NON_STATIONARY, p_value)
             - 弱平稳信号返回 (zscore值, WEAK, p_value)，并在日志中警告
             - 强平稳信号返回 (zscore值, STRONG, p_value)
@@ -810,14 +816,17 @@ class DelayCorrelationAnalyzer:
             recent_btc = btc_prices.iloc[-window:]
             recent_alt = alt_prices.iloc[-window:]
 
-            # 3. 计算 Beta（基于这 window 期数据）
+            # 3. 计算 Beta（修复循环依赖：基于前 window-1 期数据，排除最后一个点）
+            # 避免使用最后一个点的价格信息计算Beta，再用该Beta构建最后一个点的价差
+            beta_btc = recent_btc.iloc[:-1]
+            beta_alt = recent_alt.iloc[:-1]
             rolling_beta = DelayCorrelationAnalyzer._calculate_rolling_beta_from_prices(
-                recent_btc, recent_alt, window=window, coin=coin
+                beta_btc, beta_alt, window=window-1, coin=coin
             )
             if rolling_beta is None:
                 return None, None, None
 
-            # 4. 构建对数价差序列（修复：仅计算当前窗口的价差）
+            # 4. 构建对数价差序列（使用基于历史数据计算的Beta构建整个window的价差序列）
             log_btc = np.log(recent_btc)
             log_alt = np.log(recent_alt)
             spread = log_alt - rolling_beta * log_btc
