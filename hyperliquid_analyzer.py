@@ -728,9 +728,9 @@ class DelayCorrelationAnalyzer:
             recent_alt_full = alt_prices.iloc[-data_window:]
 
             # 5. Beta 计算（长窗口，保留 look-ahead bias 防护）
-            # 取前 beta_window-1 个点计算 Beta，避免使用最后一个点的信息
-            beta_btc = recent_btc_full.iloc[:beta_window].iloc[:-1]  # 前 beta_window-1 个点
-            beta_alt = recent_alt_full.iloc[:beta_window].iloc[:-1]
+            # 使用前 beta_window-1 个点计算 Beta，避免使用最后一个点的信息
+            beta_btc = recent_btc_full.iloc[:-1]
+            beta_alt = recent_alt_full.iloc[:-1]
             rolling_beta = DelayCorrelationAnalyzer._calculate_beta_from_prices(
                 beta_btc, beta_alt, coin=coin
             )
@@ -875,9 +875,9 @@ class DelayCorrelationAnalyzer:
             recent_alt_full = alt_prices.iloc[-data_window:]
 
             # 5. Beta 计算（长窗口，保留 look-ahead bias 防护）
-            # 取前 beta_window-1 个点计算 Beta，避免使用最后一个点的信息
-            beta_btc = recent_btc_full.iloc[:beta_window].iloc[:-1]  # 前 beta_window-1 个点
-            beta_alt = recent_alt_full.iloc[:beta_window].iloc[:-1]
+            # 使用前 beta_window-1 个点计算 Beta，避免使用最后一个点的信息
+            beta_btc = recent_btc_full.iloc[:-1]
+            beta_alt = recent_alt_full.iloc[:-1]
             rolling_beta = DelayCorrelationAnalyzer._calculate_beta_from_prices(
                 beta_btc, beta_alt, coin=coin
             )
