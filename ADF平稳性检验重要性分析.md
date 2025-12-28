@@ -723,10 +723,3 @@ if stationarity_level == StationarityLevel.WEAK:
 
 5. **Elliott, R. J., Van Der Hoek, J., & Malcolm, W. P. (2005)**. Pairs trading. *Quantitative Finance*, 5(3), 271-276.
 
----
-
-**文档版本**：v1.0  
-**创建日期**：2025-01-XX  
-**适用项目**：Hyperliquid BTC 滞后性追踪器  
-**作者**：基于项目代码分析生成
-

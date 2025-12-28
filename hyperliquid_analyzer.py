@@ -1215,15 +1215,15 @@ class DelayCorrelationAnalyzer:
 
         # ========== 新增：协整验证（论文方法）==========
         if is_anomaly and price_data_cache is not None:
-            # 使用长期数据（7d）进行协整检验，因为长期数据更能反映真实的协整关系
-            long_term_key = None
+            # 使用1d数据进行协整检验
+            cointegration_key = None
             for tf, p in price_data_cache.keys():
-                if p == '7d':
-                    long_term_key = (tf, p)
+                if p == '1d':
+                    cointegration_key = (tf, p)
                     break
 
-            if long_term_key and long_term_key in price_data_cache:
-                price_data = price_data_cache[long_term_key]
+            if cointegration_key and cointegration_key in price_data_cache:
+                price_data = price_data_cache[cointegration_key]
                 btc_prices = price_data['btc_prices']
                 alt_prices = price_data['alt_prices']
 
@@ -1242,7 +1242,7 @@ class DelayCorrelationAnalyzer:
                         f"原因: 价差非平稳，不适合配对交易"
                         f"{coin_info}"
                     )
-                    is_anomaly = False  # ⚠️ 协整失败，拒绝信号
+                    # is_anomaly = False  # ⚠️ 协整失败，拒绝信号
                 else:
                     # 协整检验通过，输出详细信息
                     coin_info = f" | 币种: {coin}" if coin else ""
