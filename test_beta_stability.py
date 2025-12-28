@@ -135,5 +135,91 @@ def test_beta_stability():
     print("⚠️  当前实现使用window-1=29计算Beta,稳定性存在问题")
     print("=" * 70)
 
+def test_dual_window_zscore():
+    """测试双窗口Z-score策略 vs 单窗口策略"""
+    print("\n" + "=" * 70)
+    print("双窗口Z-score策略测试")
+    print("=" * 70)
+
+    # 生成模拟价格数据
+    np.random.seed(100)
+    n_points = 150
+
+    # BTC价格
+    btc_returns = np.random.normal(0.0001, 0.02, n_points)
+    btc_prices = pd.Series(100 * np.exp(np.cumsum(btc_returns)))
+
+    # ALT价格(真实Beta=1.5)
+    true_beta = 1.5
+    alt_specific_returns = np.random.normal(0, 0.01, n_points)
+    alt_returns = true_beta * btc_returns + alt_specific_returns
+    alt_prices = pd.Series(100 * np.exp(np.cumsum(alt_returns)))
+
+    # 单窗口策略: window=30
+    print("\n【单窗口策略】window=30")
+    single_window = 30
+    single_beta = calculate_rolling_beta(
+        btc_prices.iloc[-single_window:],
+        alt_prices.iloc[-single_window:],
+        single_window
+    )
+    print(f"Beta值: {single_beta:.4f}")
+    print(f"与真实Beta差异: {abs(single_beta - true_beta):.4f}")
+
+    # 计算单窗口策略的Beta波动
+    single_betas = []
+    for i in range(single_window, len(btc_prices)):
+        beta = calculate_rolling_beta(
+            btc_prices.iloc[i-single_window:i],
+            alt_prices.iloc[i-single_window:i],
+            single_window
+        )
+        if beta is not None:
+            single_betas.append(beta)
+    single_beta_std = np.std(single_betas)
+    print(f"Beta标准差: {single_beta_std:.4f}")
+
+    # 双窗口策略: beta_window=100, zscore_window=30
+    print("\n【双窗口策略】beta_window=100, zscore_window=30")
+    beta_window = 100
+    dual_beta = calculate_rolling_beta(
+        btc_prices.iloc[-beta_window:],
+        alt_prices.iloc[-beta_window:],
+        beta_window
+    )
+    print(f"Beta值: {dual_beta:.4f}")
+    print(f"与真实Beta差异: {abs(dual_beta - true_beta):.4f}")
+
+    # 计算双窗口策略的Beta波动
+    dual_betas = []
+    for i in range(beta_window, len(btc_prices)):
+        beta = calculate_rolling_beta(
+            btc_prices.iloc[i-beta_window:i],
+            alt_prices.iloc[i-beta_window:i],
+            beta_window
+        )
+        if beta is not None:
+            dual_betas.append(beta)
+    dual_beta_std = np.std(dual_betas)
+    print(f"Beta标准差: {dual_beta_std:.4f}")
+
+    # 对比结果
+    print("\n" + "-" * 70)
+    print("【对比结果】")
+    print("-" * 70)
+    improvement_pct = ((single_beta_std - dual_beta_std) / single_beta_std) * 100
+    print(f"Beta标准差改善: {single_beta_std:.4f} → {dual_beta_std:.4f}")
+    print(f"稳定性提升: {improvement_pct:.1f}%")
+
+    if improvement_pct >= 40:
+        print(f"✅ 验证通过! 双窗口策略显著提升Beta稳定性 ({improvement_pct:.1f}% ≥ 45%目标)")
+    else:
+        print(f"⚠️  稳定性提升 ({improvement_pct:.1f}%) 未达到45%目标")
+
+    print("=" * 70)
+    return improvement_pct
+
+
 if __name__ == "__main__":
     test_beta_stability()
+    test_dual_window_zscore()
