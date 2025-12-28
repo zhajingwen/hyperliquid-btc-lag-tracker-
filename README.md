@@ -332,6 +332,7 @@ pip install -r requirements.txt
 - **numpy** (>=2.3.4): 数值计算
 - **pandas** (>=2.3.3): 数据分析
 - **retry** (>=0.9.2): 自动重试机制
+- **statsmodels** (>=0.14.6): ADF 平稳性检验（用于价差序列平稳性验证）
 
 **可选依赖**：
 - **matplotlib** (>=3.10.7): 数据可视化
