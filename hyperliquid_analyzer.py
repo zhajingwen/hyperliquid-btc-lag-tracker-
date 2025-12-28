@@ -654,7 +654,7 @@ class DelayCorrelationAnalyzer:
         Args:
             btc_prices: BTC 价格序列（pandas Series）
             alt_prices: 山寨币价格序列（pandas Series）
-            window: 滚动窗口大小（默认 20），同时用于 Beta、均值、标准差的计算
+            window: 滚动窗口大小（默认 20），用于 Beta、均值、标准差的计算
             check_stationarity: 是否进行平稳性检验（默认 True）
             coin: 币种名称（可选，用于日志）
 
@@ -667,8 +667,12 @@ class DelayCorrelationAnalyzer:
 
         Note:
             - 使用对数价差符合协整理论
-            - Beta 系数使用滚动窗口计算（_calculate_rolling_beta_from_prices），
-              与均值和标准差使用相同窗口，保证统计一致性
+            - 统计计算基于最近 window 期数据，确保时间一致性：
+              1. 取最近 window 期数据
+              2. 计算该窗口的 Beta 系数
+              3. 构建该窗口的价差序列
+              4. 计算该窗口的均值和标准差
+              5. 计算当前时刻的 Z-score
             - 对数价差具有比例缩放不变性
             - 如果价差序列非平稳，返回 None（均值回归假设不成立）
         """
@@ -687,18 +691,22 @@ class DelayCorrelationAnalyzer:
             return None
 
         try:
-            # 3. 使用滚动窗口计算 Beta（与均值和标准差使用相同窗口）
+            # 3. 取最近 window 期的数据（修复：确保时间一致性）
+            recent_btc = btc_prices.iloc[-window:]
+            recent_alt = alt_prices.iloc[-window:]
+
+            # 4. 计算 Beta（基于这 window 期数据）
             rolling_beta = DelayCorrelationAnalyzer._calculate_rolling_beta_from_prices(
-                btc_prices, alt_prices, window=window, coin=coin
+                recent_btc, recent_alt, window=window, coin=coin
             )
             if rolling_beta is None:
                 coin_info = f" | 币种: {coin}" if coin else ""
                 logger.debug(f"Z-score 计算失败：滚动窗口 Beta 计算失败{coin_info}")
                 return None
 
-            # 4. 构建对数价差序列：log_spread = log(alt) - β × log(btc)
-            log_btc = np.log(btc_prices)
-            log_alt = np.log(alt_prices)
+            # 5. 构建对数价差序列（修复：仅计算当前窗口的价差）
+            log_btc = np.log(recent_btc)
+            log_alt = np.log(recent_alt)
             spread = log_alt - rolling_beta * log_btc
 
             # ========== 新增：分级平稳性检验 ==========
@@ -725,29 +733,28 @@ class DelayCorrelationAnalyzer:
                     )
             # =====================================
 
-            # 5. 计算滚动均值和标准差
-            spread_mean = spread.rolling(window=window, min_periods=window).mean()
-            spread_std = spread.rolling(window=window, min_periods=window).std()
+            # 6. 计算统计量（修复样本偏差：使用前window-1期数据，排除当前值）
+            # 避免"用样本测试样本本身"的问题，防止Z-score被系统性低估
+            spread_mean = spread.iloc[:-1].mean()
+            spread_std = spread.iloc[:-1].std()
 
-            # 6. 检查是否有足够的有效数据
-            if pd.isna(spread_mean.iloc[-1]) or pd.isna(spread_std.iloc[-1]):
+            # 7. 检查统计量有效性
+            if pd.isna(spread_mean) or pd.isna(spread_std):
                 coin_info = f" | 币种: {coin}" if coin else ""
-                logger.debug(f"Z-score 计算失败：滚动统计量包含 NaN{coin_info}")
+                logger.debug(f"Z-score 计算失败：统计量包含 NaN{coin_info}")
                 return None
 
-            # 7. 检查标准差是否为 0（避免除以 0）
-            if spread_std.iloc[-1] == 0 or np.isnan(spread_std.iloc[-1]):
+            # 8. 检查标准差是否为 0（避免除以 0）
+            if spread_std == 0 or np.isnan(spread_std):
                 coin_info = f" | 币种: {coin}" if coin else ""
                 logger.debug(f"Z-score 计算失败：价差序列标准差为 0 或 NaN{coin_info}")
                 return None
 
-            # 8. 计算当前 Z-score
+            # 9. 计算当前 Z-score（修复：使用当前窗口的最后一个价差值）
             current_spread = spread.iloc[-1]
-            current_mean = spread_mean.iloc[-1]
-            current_std = spread_std.iloc[-1]
-            zscore = (current_spread - current_mean) / current_std
+            zscore = (current_spread - spread_mean) / spread_std
 
-            # 9. 检查结果有效性
+            # 10. 检查结果有效性
             if np.isnan(zscore) or np.isinf(zscore):
                 coin_info = f" | 币种: {coin}" if coin else ""
                 logger.debug(f"Z-score 计算失败：结果为 NaN 或 Inf | Z-score: {zscore}{coin_info}")
@@ -776,7 +783,7 @@ class DelayCorrelationAnalyzer:
         Args:
             btc_prices: BTC 价格序列
             alt_prices: 山寨币价格序列
-            window: 滚动窗口大小（默认20），同时用于 Beta、均值、标准差的计算
+            window: 滚动窗口大小（默认20），用于 Beta、均值、标准差的计算
             coin: 币种名称（用于日志）
 
         Returns:
@@ -786,8 +793,7 @@ class DelayCorrelationAnalyzer:
                 - p_value: ADF检验的p-value（如果计算失败则为 None）
 
         Note:
-            - Beta 系数使用滚动窗口计算（_calculate_rolling_beta_from_prices），
-              与均值和标准差使用相同窗口，保证统计一致性
+            - 统计计算基于最近 window 期数据，确保时间一致性
             - 非平稳信号返回 (None, NON_STATIONARY, p_value)
             - 弱平稳信号返回 (zscore值, WEAK, p_value)，并在日志中警告
             - 强平稳信号返回 (zscore值, STRONG, p_value)
@@ -800,16 +806,20 @@ class DelayCorrelationAnalyzer:
             return None, None, None
 
         try:
-            # 2. 使用滚动窗口计算 Beta（与均值和标准差使用相同窗口）
+            # 2. 取最近 window 期的数据（修复：确保时间一致性）
+            recent_btc = btc_prices.iloc[-window:]
+            recent_alt = alt_prices.iloc[-window:]
+
+            # 3. 计算 Beta（基于这 window 期数据）
             rolling_beta = DelayCorrelationAnalyzer._calculate_rolling_beta_from_prices(
-                btc_prices, alt_prices, window=window, coin=coin
+                recent_btc, recent_alt, window=window, coin=coin
             )
             if rolling_beta is None:
                 return None, None, None
 
-            # 3. 构建对数价差序列
-            log_btc = np.log(btc_prices)
-            log_alt = np.log(alt_prices)
+            # 4. 构建对数价差序列（修复：仅计算当前窗口的价差）
+            log_btc = np.log(recent_btc)
+            log_alt = np.log(recent_alt)
             spread = log_alt - rolling_beta * log_btc
 
             # 3. 执行分级平稳性检验
@@ -836,20 +846,21 @@ class DelayCorrelationAnalyzer:
                     f"{coin_info}"
                 )
 
-            # 6. 计算Z-score（复用原有逻辑）
-            spread_mean = spread.rolling(window=window, min_periods=window).mean()
-            spread_std = spread.rolling(window=window, min_periods=window).std()
+            # 6. 计算统计量（修复样本偏差：使用前window-1期数据，排除当前值）
+            # 避免"用样本测试样本本身"的问题，防止Z-score被系统性低估
+            spread_mean = spread.iloc[:-1].mean()
+            spread_std = spread.iloc[:-1].std()
 
-            if pd.isna(spread_mean.iloc[-1]) or pd.isna(spread_std.iloc[-1]):
+            # 7. 检查统计量有效性
+            if pd.isna(spread_mean) or pd.isna(spread_std):
                 return None, stationarity_level, p_value
 
-            if spread_std.iloc[-1] == 0 or np.isnan(spread_std.iloc[-1]):
+            if spread_std == 0 or np.isnan(spread_std):
                 return None, stationarity_level, p_value
 
+            # 8. 计算当前 Z-score（修复：使用当前窗口的最后一个价差值）
             current_spread = spread.iloc[-1]
-            current_mean = spread_mean.iloc[-1]
-            current_std = spread_std.iloc[-1]
-            zscore = (current_spread - current_mean) / current_std
+            zscore = (current_spread - spread_mean) / spread_std
 
             if np.isnan(zscore) or np.isinf(zscore):
                 return None, stationarity_level, p_value
