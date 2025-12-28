@@ -10,6 +10,7 @@ from enum import Enum
 from retry import retry
 from logging.handlers import RotatingFileHandler
 from statsmodels.tsa.stattools import adfuller
+from sklearn.linear_model import LinearRegression
 from typing import Union, Tuple, Optional
 from utils.lark_bot import sender
 from utils.config import lark_bot_id
@@ -122,7 +123,7 @@ class DelayCorrelationAnalyzer:
     # Z-score 阈值，超过此值才认为是显著的套利机会
     ZSCORE_THRESHOLD = 2.0  # 标准差倍数
     # Z-score 计算的滚动窗口大小
-    ZSCORE_WINDOW = 20  # 建议值：20-30，根据数据频率调整
+    ZSCORE_WINDOW = 30  # 建议值：20-30，根据数据频率调整
 
     # ========== 新增：分级平稳性检验配置 ==========
     # 是否启用平稳性检验（默认启用）
@@ -410,6 +411,64 @@ class DelayCorrelationAnalyzer:
             coin_info = f" | 币种: {coin}" if coin else ""
             logger.warning(f"Beta 计算异常：{type(e).__name__}: {str(e)}{coin_info}")
             return np.nan
+
+    @staticmethod
+    def _calculate_cointegration_params(btc_prices: pd.Series, alt_prices: pd.Series,
+                                        coin: str = None) -> Optional[dict]:
+        """
+        使用OLS回归计算协整参数（验证性函数）
+
+        通过OLS回归计算截距项α和斜率β，并进行ADF检验验证价差平稳性。
+        这是协整检验的标准方法（Engle-Granger两步法）。
+
+        Args:
+            btc_prices: BTC价格序列（pandas Series）
+            alt_prices: 山寨币价格序列（pandas Series）
+            coin: 币种名称（可选，用于日志）
+
+        Returns:
+            dict: {
+                'alpha': 截距项（价格溢价/折价）,
+                'beta': OLS回归系数（对冲比例）,
+                'spread': OLS价差序列（残差）,
+                'adf_pvalue': ADF检验p值（平稳性）
+            }
+            None: 如果计算失败
+
+        Note:
+            - α显著非0表示存在固定溢价/折价
+            - β是最优对冲比例
+            - ADF p-value < 0.05 表示价差平稳，适合配对交易
+        """
+        try:
+            # 1. 计算对数价格
+            log_btc = np.log(btc_prices).values.reshape(-1, 1)
+            log_alt = np.log(alt_prices).values
+
+            # 2. OLS回归：log_alt = α + β * log_btc + ε
+            model = LinearRegression()
+            model.fit(log_btc, log_alt)
+
+            alpha = model.intercept_
+            beta = model.coef_[0]
+
+            # 3. 计算OLS价差（残差）
+            spread_ols = log_alt - (alpha + beta * log_btc.flatten())
+
+            # 4. ADF检验价差平稳性
+            adf_result = adfuller(spread_ols, autolag='AIC')
+            adf_pvalue = adf_result[1]
+
+            return {
+                'alpha': alpha,
+                'beta': beta,
+                'spread': pd.Series(spread_ols),
+                'adf_pvalue': adf_pvalue
+            }
+        except Exception as e:
+            coin_info = f" | 币种: {coin}" if coin else ""
+            logger.debug(f"OLS协整参数计算失败：{type(e).__name__}: {str(e)}{coin_info}")
+            return None
 
     @staticmethod
     def _calculate_beta_from_prices(btc_prices: pd.Series, alt_prices: pd.Series, coin: str = None) -> Optional[float]:
@@ -1081,20 +1140,23 @@ class DelayCorrelationAnalyzer:
 
         return (related_matrix, timeframe, period, tau_star, beta)
     
-    def _detect_anomaly_pattern(self, results: list, coin: str = None) -> tuple[bool, float, float, float]:
+    def _detect_anomaly_pattern(self, results: list, price_data_cache: dict = None,
+                               coin: str = None) -> tuple[bool, float, float, float]:
         """
-        检测异常模式：短期低相关但长期高相关
-        
+        检测异常模式：短期低相关但长期高相关（增强版：包含协整验证）
+
         异常模式判断阈值：
         - 长期相关系数 > LONG_TERM_CORR_THRESHOLD：长期与BTC有较强跟随性（7d对应5m）
         - 短期相关系数 < SHORT_TERM_CORR_THRESHOLD：短期存在明显滞后（1d对应1m）
         - 差值 > CORR_DIFF_THRESHOLD：短期和长期差异足够显著
         - 平均Beta系数 >= AVG_BETA_THRESHOLD：波动幅度需满足阈值要求
-        
+        - 协整检验 ADF p-value < 0.05：价差平稳，适合配对交易（新增）
+
         Args:
             results: 分析结果列表
+            price_data_cache: 价格数据缓存字典 {(timeframe, period): {'btc_prices': ..., 'alt_prices': ...}}
             coin: 币种名称（可选，用于日志）
-        
+
         Returns:
             (is_anomaly, diff_amount, min_short_corr, max_long_corr): 是否异常模式、相关系数差值、短期最小相关系数、长期最大相关系数
         """
@@ -1150,7 +1212,48 @@ class DelayCorrelationAnalyzer:
             # x[3] 是最优延迟，x[2] 是数据周期
             if any((x[3] > 0) for x in results if len(x) >= 4 and x[2] == '1d'):
                 is_anomaly = True
-        
+
+        # ========== 新增：协整验证（论文方法）==========
+        if is_anomaly and price_data_cache is not None:
+            # 使用长期数据（7d）进行协整检验，因为长期数据更能反映真实的协整关系
+            long_term_key = None
+            for tf, p in price_data_cache.keys():
+                if p == '7d':
+                    long_term_key = (tf, p)
+                    break
+
+            if long_term_key and long_term_key in price_data_cache:
+                price_data = price_data_cache[long_term_key]
+                btc_prices = price_data['btc_prices']
+                alt_prices = price_data['alt_prices']
+
+                # 协整检验
+                ols_params = self._calculate_cointegration_params(
+                    btc_prices, alt_prices, coin=coin
+                )
+
+                if ols_params is None or ols_params['adf_pvalue'] >= 0.05:
+                    coin_info = f" | 币种: {coin}" if coin else ""
+                    adf_pvalue_str = f"{ols_params['adf_pvalue']:.4f}" if ols_params else 'N/A'
+                    logger.info(
+                        f"协整检验未通过，过滤信号 | "
+                        f"相关系数: {max_long_corr:.4f} | "
+                        f"ADF p-value: {adf_pvalue_str} >= 0.05 | "
+                        f"原因: 价差非平稳，不适合配对交易"
+                        f"{coin_info}"
+                    )
+                    is_anomaly = False  # ⚠️ 协整失败，拒绝信号
+                else:
+                    # 协整检验通过，输出详细信息
+                    coin_info = f" | 币种: {coin}" if coin else ""
+                    logger.info(
+                        f"✅ 协整检验通过 | "
+                        f"α={ols_params['alpha']:.4f}, β={ols_params['beta']:.4f}, "
+                        f"ADF p-value={ols_params['adf_pvalue']:.4f} < 0.05"
+                        f"{coin_info}"
+                    )
+        # =====================================
+
         return is_anomaly, diff_amount, min_short_corr, max_long_corr
     
     def _output_results(self, coin: str, results: list, diff_amount: float,
@@ -1382,7 +1485,9 @@ class DelayCorrelationAnalyzer:
             logger.warning(f"数据不足，无法分析 | 币种: {coin}")
             return False
 
-        is_anomaly, diff_amount, min_short_corr, max_long_corr = self._detect_anomaly_pattern(valid_results, coin=coin)
+        is_anomaly, diff_amount, min_short_corr, max_long_corr = self._detect_anomaly_pattern(
+            valid_results, price_data_cache=price_data_cache, coin=coin
+        )
         logger.info(
             f"相关系数检测 | 币种: {coin} | 是否异常: {is_anomaly} | 相关系数差值: {diff_amount:.4f} | 短期最小: {min_short_corr:.4f} | 长期最大: {max_long_corr:.4f}"
             )
