@@ -2,8 +2,8 @@ import requests
 import json
 import logging
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('Lark Alert')
+logger.propagate = False  # 阻止日志传播到根 logger，避免重复打印
 
 def sender(msg, url=None, title='', del_blank_row=True):
     """

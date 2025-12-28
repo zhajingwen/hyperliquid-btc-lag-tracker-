@@ -3,8 +3,8 @@ import logging
 from datetime import datetime, timedelta
 from utils.config import env
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('Timer Scheduler')
+logger.propagate = False  # 阻止日志传播到根 logger，避免重复打印
 
 def scheduled_task(start_time=None, duration=None, weekdays=None):
     """

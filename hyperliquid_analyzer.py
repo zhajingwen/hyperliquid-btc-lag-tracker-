@@ -29,30 +29,52 @@ def setup_logging(log_file="hyperliquid.log", level=logging.DEBUG):
     """
     log = logging.getLogger(__name__)
     
-    # 避免重复添加 handlers
-    if log.handlers:
+    # 避免重复添加 handlers：检查是否已有相同类型的handler
+    has_console_handler = any(
+        isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
+        for h in log.handlers
+    )
+    # 检查文件handler：检查是否有RotatingFileHandler类型的handler
+    # 由于我们只使用RotatingFileHandler，简单检查类型即可
+    has_file_handler = any(
+        isinstance(h, RotatingFileHandler)
+        for h in log.handlers
+    )
+    
+    # 如果handlers已存在，直接返回
+    if has_console_handler and has_file_handler:
         return log
+    
+    # 检查根logger是否已被配置（避免与其他模块的basicConfig冲突）
+    root_logger = logging.getLogger()
+    root_has_handlers = len(root_logger.handlers) > 0
     
     formatter = logging.Formatter(
         '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     
-    # 控制台处理器
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(formatter)
+    # 只添加缺失的handler
+    if not has_console_handler:
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(formatter)
+        log.addHandler(console_handler)
     
-    # 文件处理器（10MB轮转，保留5个备份）
-    file_handler = RotatingFileHandler(
-        log_file, maxBytes=10*1024*1024, backupCount=5, encoding='utf-8'
-    )
-    file_handler.setFormatter(formatter)
+    if not has_file_handler:
+        file_handler = RotatingFileHandler(
+            log_file, maxBytes=10*1024*1024, backupCount=5, encoding='utf-8'
+        )
+        file_handler.setFormatter(formatter)
+        log.addHandler(file_handler)
     
     # 配置 logger
     log.setLevel(level)
     log.propagate = False  # 阻止日志传播到根 logger，避免重复打印
-    log.addHandler(console_handler)
-    log.addHandler(file_handler)
+    
+    # 如果根logger已被其他模块配置，确保不会导致重复输出
+    if root_has_handlers:
+        # 确保所有子logger都不传播到根logger
+        log.propagate = False
     
     return log
 
@@ -122,7 +144,7 @@ class DelayCorrelationAnalyzer:
     ENABLE_ZSCORE_CHECK = True
     # Z-score 阈值，超过此值才认为是显著的套利机会
     ZSCORE_THRESHOLD = 2.0  # 标准差倍数
-    # Z-score 计算的滚动窗口大小
+    # Z-score 计算的滚动窗口大小（同时用于 Beta、均值、标准差的计算，保证统计一致性）
     ZSCORE_WINDOW = 30  # 建议值：20-30，根据数据频率调整
 
     # ========== 新增：分级平稳性检验配置 ==========
@@ -473,11 +495,15 @@ class DelayCorrelationAnalyzer:
     @staticmethod
     def _calculate_beta_from_prices(btc_prices: pd.Series, alt_prices: pd.Series, coin: str = None) -> Optional[float]:
         """
-        基于对数价格计算 Beta 系数（用于构建价差序列）
+        基于对数价格计算 Beta 系数（全样本计算）
 
         与 _calculate_beta() 的区别：
         - _calculate_beta()：基于收益率，用于波动率分析
-        - _calculate_beta_from_prices()：基于对数价格，用于 Z-score 计算
+        - _calculate_beta_from_prices()：基于对数价格，使用全样本计算
+
+        与 _calculate_rolling_beta_from_prices() 的区别：
+        - _calculate_beta_from_prices()：使用全样本计算 Beta
+        - _calculate_rolling_beta_from_prices()：使用滚动窗口计算 Beta（用于 Z-score）
 
         Args:
             btc_prices: BTC 价格序列（pandas Series）
@@ -485,12 +511,13 @@ class DelayCorrelationAnalyzer:
             coin: 币种名称（可选，用于日志）
 
         Returns:
-            float: Beta 系数值（基于对数价格）
+            float: Beta 系数值（基于对数价格，全样本）
             None: 如果计算失败
 
         Note:
             - 使用对数价格可以消除价格量级差异
             - 对数价格的线性关系更稳定，符合协整理论
+            - 注意：Z-score 计算应使用 _calculate_rolling_beta_from_prices() 以保持统计一致性
         """
         # 1. 数据长度检查
         if len(btc_prices) != len(alt_prices):
@@ -537,8 +564,86 @@ class DelayCorrelationAnalyzer:
             return None
 
     @staticmethod
+    def _calculate_rolling_beta_from_prices(btc_prices: pd.Series, alt_prices: pd.Series,
+                                             window: int, coin: str = None) -> Optional[float]:
+        """
+        基于滚动窗口计算 Beta 系数（用于 Z-score 计算）
+
+        使用最近 window 个数据点计算 Beta，与 Z-score 的均值和标准差计算窗口保持一致，
+        确保统计一致性。
+
+        与 _calculate_beta_from_prices() 的区别：
+        - _calculate_beta_from_prices()：使用全样本计算 Beta
+        - _calculate_rolling_beta_from_prices()：使用滚动窗口计算 Beta
+
+        Args:
+            btc_prices: BTC 价格序列（pandas Series）
+            alt_prices: 山寨币价格序列（pandas Series）
+            window: 滚动窗口大小（应与 Z-score 窗口相同）
+            coin: 币种名称（可选，用于日志）
+
+        Returns:
+            float: Beta 系数值（基于滚动窗口的对数价格）
+            None: 如果计算失败
+
+        Note:
+            - 使用对数价格可以消除价格量级差异
+            - 滚动窗口 Beta 能反映近期价差关系变化
+            - Beta、均值、标准差使用相同窗口，保证统计一致性
+        """
+        # 1. 数据长度检查
+        if len(btc_prices) != len(alt_prices):
+            coin_info = f" | 币种: {coin}" if coin else ""
+            logger.warning(f"滚动 Beta 计算失败：BTC 和 ALT 数据长度不一致 | "
+                          f"BTC: {len(btc_prices)}, ALT: {len(alt_prices)}"
+                          f"{coin_info}")
+            return None
+
+        # 2. 最小数据点检查
+        if len(btc_prices) < window:
+            coin_info = f" | 币种: {coin}" if coin else ""
+            logger.debug(f"滚动 Beta 计算失败：数据点不足 | 需要: {window}, 实际: {len(btc_prices)}{coin_info}")
+            return None
+
+        try:
+            # 3. 取最后 window 个数据点
+            btc_window = btc_prices.iloc[-window:]
+            alt_window = alt_prices.iloc[-window:]
+
+            # 4. 计算对数价格
+            log_btc = np.log(btc_window)
+            log_alt = np.log(alt_window)
+
+            # 5. 计算协方差矩阵
+            cov_matrix = np.cov(log_btc, log_alt)
+            covariance = cov_matrix[0, 1]
+            btc_variance = cov_matrix[0, 0]
+
+            # 6. 检查 BTC 方差是否为 0
+            if btc_variance == 0 or np.isnan(btc_variance):
+                coin_info = f" | 币种: {coin}" if coin else ""
+                logger.debug(f"滚动 Beta 计算失败：BTC 对数价格方差为 0 或 NaN{coin_info}")
+                return None
+
+            # 7. 计算 Beta
+            beta = covariance / btc_variance
+
+            # 8. 检查结果有效性
+            if np.isnan(beta) or np.isinf(beta):
+                coin_info = f" | 币种: {coin}" if coin else ""
+                logger.debug(f"滚动 Beta 计算失败：结果为 NaN 或 Inf | Beta: {beta}{coin_info}")
+                return None
+
+            return beta
+
+        except Exception as e:
+            coin_info = f" | 币种: {coin}" if coin else ""
+            logger.warning(f"滚动 Beta 计算异常：{type(e).__name__}: {str(e)}{coin_info}")
+            return None
+
+    @staticmethod
     def _calculate_zscore(btc_prices: pd.Series, alt_prices: pd.Series,
-                          beta: float, window: int = 20,
+                          window: int = 20,
                           check_stationarity: bool = True, coin: str = None) -> Optional[float]:
         """
         计算价差的 Z-score（增强版：使用对数价差并包含平稳性检验）
@@ -549,8 +654,7 @@ class DelayCorrelationAnalyzer:
         Args:
             btc_prices: BTC 价格序列（pandas Series）
             alt_prices: 山寨币价格序列（pandas Series）
-            beta: Beta 系数（基于对数价格计算，使用 _calculate_beta_from_prices）
-            window: 滚动窗口大小（默认 20）
+            window: 滚动窗口大小（默认 20），同时用于 Beta、均值、标准差的计算
             check_stationarity: 是否进行平稳性检验（默认 True）
             coin: 币种名称（可选，用于日志）
 
@@ -563,7 +667,8 @@ class DelayCorrelationAnalyzer:
 
         Note:
             - 使用对数价差符合协整理论
-            - Beta 系数应该基于对数价格计算（使用 _calculate_beta_from_prices）
+            - Beta 系数使用滚动窗口计算（_calculate_rolling_beta_from_prices），
+              与均值和标准差使用相同窗口，保证统计一致性
             - 对数价差具有比例缩放不变性
             - 如果价差序列非平稳，返回 None（均值回归假设不成立）
         """
@@ -581,17 +686,20 @@ class DelayCorrelationAnalyzer:
             logger.debug(f"Z-score 计算失败：数据点不足 | 需要: {window}, 实际: {len(btc_prices)}{coin_info}")
             return None
 
-        # 3. Beta 有效性检查
-        if np.isnan(beta) or np.isinf(beta) or beta == 0:
-            coin_info = f" | 币种: {coin}" if coin else ""
-            logger.debug(f"Z-score 计算失败：Beta 系数无效 | Beta: {beta}{coin_info}")
-            return None
-
         try:
+            # 3. 使用滚动窗口计算 Beta（与均值和标准差使用相同窗口）
+            rolling_beta = DelayCorrelationAnalyzer._calculate_rolling_beta_from_prices(
+                btc_prices, alt_prices, window=window, coin=coin
+            )
+            if rolling_beta is None:
+                coin_info = f" | 币种: {coin}" if coin else ""
+                logger.debug(f"Z-score 计算失败：滚动窗口 Beta 计算失败{coin_info}")
+                return None
+
             # 4. 构建对数价差序列：log_spread = log(alt) - β × log(btc)
             log_btc = np.log(btc_prices)
             log_alt = np.log(alt_prices)
-            spread = log_alt - beta * log_btc
+            spread = log_alt - rolling_beta * log_btc
 
             # ========== 新增：分级平稳性检验 ==========
             if check_stationarity:
@@ -656,7 +764,6 @@ class DelayCorrelationAnalyzer:
     def _calculate_zscore_with_level(
         btc_prices: pd.Series,
         alt_prices: pd.Series,
-        beta: float,
         window: int = 20,
         coin: str = None
     ) -> Tuple[Optional[float], Optional['StationarityLevel'], Optional[float]]:
@@ -669,8 +776,7 @@ class DelayCorrelationAnalyzer:
         Args:
             btc_prices: BTC 价格序列
             alt_prices: 山寨币价格序列
-            beta: Beta 系数
-            window: 滚动窗口大小（默认20）
+            window: 滚动窗口大小（默认20），同时用于 Beta、均值、标准差的计算
             coin: 币种名称（用于日志）
 
         Returns:
@@ -680,6 +786,8 @@ class DelayCorrelationAnalyzer:
                 - p_value: ADF检验的p-value（如果计算失败则为 None）
 
         Note:
+            - Beta 系数使用滚动窗口计算（_calculate_rolling_beta_from_prices），
+              与均值和标准差使用相同窗口，保证统计一致性
             - 非平稳信号返回 (None, NON_STATIONARY, p_value)
             - 弱平稳信号返回 (zscore值, WEAK, p_value)，并在日志中警告
             - 强平稳信号返回 (zscore值, STRONG, p_value)
@@ -691,14 +799,18 @@ class DelayCorrelationAnalyzer:
         if len(btc_prices) < window:
             return None, None, None
 
-        if np.isnan(beta) or np.isinf(beta) or beta == 0:
-            return None, None, None
-
         try:
-            # 2. 构建对数价差序列
+            # 2. 使用滚动窗口计算 Beta（与均值和标准差使用相同窗口）
+            rolling_beta = DelayCorrelationAnalyzer._calculate_rolling_beta_from_prices(
+                btc_prices, alt_prices, window=window, coin=coin
+            )
+            if rolling_beta is None:
+                return None, None, None
+
+            # 3. 构建对数价差序列
             log_btc = np.log(btc_prices)
             log_alt = np.log(alt_prices)
-            spread = log_alt - beta * log_btc
+            spread = log_alt - rolling_beta * log_btc
 
             # 3. 执行分级平稳性检验
             stationarity_level, p_value = DelayCorrelationAnalyzer._check_spread_stationarity(
@@ -1509,24 +1621,14 @@ class DelayCorrelationAnalyzer:
             if short_term_key and short_term_key in price_data_cache:
                 price_data = price_data_cache[short_term_key]
 
-                # 使用对数价格计算 Beta（用于构建价差序列）
-                zscore_beta_prices = self._calculate_beta_from_prices(
+                # 使用增强版函数，同时获取Z-score、平稳性等级和p-value
+                # Beta 将在函数内部使用滚动窗口计算，与均值和标准差使用相同窗口
+                zscore_result, stationarity_level_result, p_value_result = self._calculate_zscore_with_level(
                     price_data['btc_prices'],
                     price_data['alt_prices'],
+                    window=self.ZSCORE_WINDOW,
                     coin=coin
                 )
-
-                if zscore_beta_prices is not None:
-                    # 使用增强版函数，同时获取Z-score、平稳性等级和p-value
-                    zscore_result, stationarity_level_result, p_value_result = self._calculate_zscore_with_level(
-                        price_data['btc_prices'],
-                        price_data['alt_prices'],
-                        zscore_beta_prices,  # 使用对数价格 Beta
-                        window=self.ZSCORE_WINDOW,
-                        coin=coin
-                    )
-                else:
-                    logger.debug(f"Z-score 计算跳过：对数价格 Beta 计算失败 | 币种: {coin}")
                 
                 if zscore_result is not None:
                     abs_zscore = abs(zscore_result)
