@@ -502,8 +502,8 @@ class DelayCorrelationAnalyzer:
         - _calculate_beta_from_prices()：基于对数价格，使用全样本计算
 
         与 _calculate_rolling_beta_from_prices() 的区别：
-        - _calculate_beta_from_prices()：使用全样本计算 Beta
-        - _calculate_rolling_beta_from_prices()：使用滚动窗口计算 Beta（用于 Z-score）
+        - _calculate_beta_from_prices()：使用传入序列的全部数据计算 Beta
+        - _calculate_rolling_beta_from_prices()：从传入序列的最后window个点计算 Beta
 
         Args:
             btc_prices: BTC 价格序列（pandas Series）
@@ -517,7 +517,7 @@ class DelayCorrelationAnalyzer:
         Note:
             - 使用对数价格可以消除价格量级差异
             - 对数价格的线性关系更稳定，符合协整理论
-            - 注意：Z-score 计算应使用 _calculate_rolling_beta_from_prices() 以保持统计一致性
+            - Z-score 计算使用此函数（数据已预先截取为window-1个点，无需滚动窗口函数）
         """
         # 1. 数据长度检查
         if len(btc_prices) != len(alt_prices):
@@ -589,7 +589,8 @@ class DelayCorrelationAnalyzer:
         Note:
             - 使用对数价格可以消除价格量级差异
             - 滚动窗口 Beta 能反映近期价差关系变化
-            - Beta、均值、标准差使用相同窗口，保证统计一致性
+            - 此函数适用于：传入完整价格序列，需要从最后window个点计算Beta的场景
+            - 注意：如果数据已经预先截取为所需窗口大小，应使用 _calculate_beta_from_prices() 避免冗余的窗口截取
         """
         # 1. 数据长度检查
         if len(btc_prices) != len(alt_prices):
@@ -669,7 +670,7 @@ class DelayCorrelationAnalyzer:
             - 使用对数价差符合协整理论
             - 统计计算基于最近 window 期数据，确保时间一致性和统计严谨性：
               1. 取最近 window 期数据
-              2. 基于前 window-1 期数据计算 Beta 系数（避免循环依赖）
+              2. 基于前 window-1 期数据计算 Beta 系数（使用 _calculate_beta_from_prices，避免循环依赖）
               3. 使用该Beta构建整个window的价差序列
               4. 基于前 window-1 期价差计算均值和标准差（避免样本偏差）
               5. 使用最后一个点的价差计算当前时刻的 Z-score
@@ -700,12 +701,13 @@ class DelayCorrelationAnalyzer:
             # 避免使用最后一个点的价格信息计算Beta，再用该Beta构建最后一个点的价差
             beta_btc = recent_btc.iloc[:-1]
             beta_alt = recent_alt.iloc[:-1]
-            rolling_beta = DelayCorrelationAnalyzer._calculate_rolling_beta_from_prices(
-                beta_btc, beta_alt, window=window-1, coin=coin
+            # 直接使用_calculate_beta_from_prices，因为数据已经截取为window-1个点，无需再次截取窗口
+            rolling_beta = DelayCorrelationAnalyzer._calculate_beta_from_prices(
+                beta_btc, beta_alt, coin=coin
             )
             if rolling_beta is None:
                 coin_info = f" | 币种: {coin}" if coin else ""
-                logger.debug(f"Z-score 计算失败：滚动窗口 Beta 计算失败{coin_info}")
+                logger.debug(f"Z-score 计算失败：Beta 计算失败{coin_info}")
                 return None
 
             # 5. 构建对数价差序列（使用基于历史数据计算的Beta构建整个window的价差序列）
@@ -798,7 +800,7 @@ class DelayCorrelationAnalyzer:
 
         Note:
             - 统计计算基于最近 window 期数据，确保时间一致性和统计严谨性
-            - Beta计算基于前 window-1 期数据，避免循环依赖（look-ahead bias）
+            - Beta计算基于前 window-1 期数据（使用 _calculate_beta_from_prices），避免循环依赖（look-ahead bias）
             - 均值和标准差基于前 window-1 期价差，避免样本偏差
             - 非平稳信号返回 (None, NON_STATIONARY, p_value)
             - 弱平稳信号返回 (zscore值, WEAK, p_value)，并在日志中警告
@@ -820,8 +822,9 @@ class DelayCorrelationAnalyzer:
             # 避免使用最后一个点的价格信息计算Beta，再用该Beta构建最后一个点的价差
             beta_btc = recent_btc.iloc[:-1]
             beta_alt = recent_alt.iloc[:-1]
-            rolling_beta = DelayCorrelationAnalyzer._calculate_rolling_beta_from_prices(
-                beta_btc, beta_alt, window=window-1, coin=coin
+            # 直接使用_calculate_beta_from_prices，因为数据已经截取为window-1个点，无需再次截取窗口
+            rolling_beta = DelayCorrelationAnalyzer._calculate_beta_from_prices(
+                beta_btc, beta_alt, coin=coin
             )
             if rolling_beta is None:
                 return None, None, None
