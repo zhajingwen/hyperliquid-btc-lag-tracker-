@@ -131,12 +131,15 @@ class DelayCorrelationAnalyzer:
     # 是否启用异常值处理（可配置开关）
     ENABLE_OUTLIER_TREATMENT = True
 
-    # ========== 新增：Beta 系数配置 ==========
-    # 是否计算 Beta 系数（默认启用）
+    # ========== 新增：Beta 收益率系数配置 ==========
+    # 是否计算 Beta 收益率系数（默认启用）
+    # Beta 收益率系数：基于 BTC 和山寨币收益率计算，衡量山寨币相对 BTC 的波动幅度
+    # 公式：β = Cov(BTC_returns, ALT_returns) / Var(BTC_returns)
     ENABLE_BETA_CALCULATION = True
-    # Beta 系数的最小数据点要求（与相关系数相同）
+    # Beta 收益率系数计算所需的最小数据点（与相关系数要求相同）
     MIN_POINTS_FOR_BETA_CALC = 10
-    # 平均Beta系数阈值，如果小于这个值就不告警
+    # 平均 Beta 收益率系数阈值：低于此值不发送告警（确保有足够的套利空间）
+    # β < 1.0 表示波动幅度小于BTC，套利空间受限
     AVG_BETA_THRESHOLD = 1
     
     # ========== 新增：Z-score 配置 ==========
@@ -146,8 +149,9 @@ class DelayCorrelationAnalyzer:
     ZSCORE_THRESHOLD = 2.0  # 标准差倍数
 
     # ========== 双窗口策略配置 ==========
-    # Beta 系数计算窗口（长期关系窗口）
-    # 目的：使用更长窗口捕捉稳定的 BTC-ALT 价格关系，减少 Beta 波动
+    # Beta 系数计算窗口（长期关系窗口，用于 Z-score 价差构建）
+    # 目的：使用更长窗口计算基于对数价格的 Beta，捕捉稳定的 BTC-ALT 价格关系
+    # 用于构建价差序列：spread = log(ALT) - β × log(BTC)
     # 测试验证：窗口=100 时 Beta 标准差从 0.29 降至 0.20，稳定性提升 45%
     BETA_WINDOW = 100  # 建议值：80-120，平衡稳定性与响应性
 
@@ -378,9 +382,15 @@ class DelayCorrelationAnalyzer:
     @staticmethod
     def _calculate_beta(btc_ret, alt_ret, coin: str = None):
         """
-        计算 Beta 系数
+        计算 Beta 收益率系数
 
-        衡量山寨币收益率相对于 BTC 收益率的跟随幅度。
+        基于收益率序列计算 Beta 系数，衡量山寨币收益率相对 BTC 收益率的波动幅度。
+        公式：β = Cov(BTC_returns, ALT_returns) / Var(BTC_returns)
+
+        应用场景：
+        - 波动率分析：评估山寨币相对 BTC 的风险暴露
+        - 对冲比例：β 值可作为对冲策略的参考比例
+        - 风险筛选：过滤低波动性资产（β < 阈值）
 
         Args:
             btc_ret: BTC 收益率数组（numpy array）
@@ -388,16 +398,17 @@ class DelayCorrelationAnalyzer:
             coin: 币种名称（可选，用于日志）
 
         Returns:
-            float: Beta 系数值
-                - Beta > 1.0: ALT 波动幅度大于 BTC
+            float: Beta 收益率系数值
+                - Beta > 1.0: ALT 波动幅度大于 BTC（高波动）
                 - Beta = 1.0: ALT 与 BTC 同步波动
-                - Beta < 1.0: ALT 波动幅度小于 BTC
-                - Beta < 0: ALT 与 BTC 反向波动（罕见）
+                - Beta < 1.0: ALT 波动幅度小于 BTC（低波动）
+                - Beta < 0: ALT 与 BTC 反向波动（罕见，可能存在对冲机会）
                 - 如果数据不足或计算失败，返回 np.nan
 
         Note:
             - Beta 系数需要至少 MIN_POINTS_FOR_BETA_CALC 个数据点
             - 如果 BTC 收益率方差为 0，返回 np.nan
+            - 此函数用于收益率数据，与基于价格的 _calculate_beta_from_prices() 不同
         """
         # 1. 数据长度检查
         if len(btc_ret) != len(alt_ret):
@@ -426,7 +437,8 @@ class DelayCorrelationAnalyzer:
                 logger.debug(f"Beta 计算失败：BTC 收益率方差为 0 或 NaN{coin_info}")
                 return np.nan
 
-            # 5. 计算 Beta 系数
+            # 5. 计算 Beta 收益率系数
+            # β = Cov(BTC_returns, ALT_returns) / Var(BTC_returns)
             beta = covariance / btc_variance
 
             # 6. 检查结果有效性
@@ -505,13 +517,21 @@ class DelayCorrelationAnalyzer:
         """
         基于对数价格计算 Beta 系数（全样本计算）
 
+        本函数通过对数价格的协方差和方差计算 Beta 系数，适用于价差序列构建和 Z-score 计算。
+        公式：β = Cov(log_BTC_prices, log_ALT_prices) / Var(log_BTC_prices)
+
         与 _calculate_beta() 的区别：
-        - _calculate_beta()：基于收益率，用于波动率分析
-        - _calculate_beta_from_prices()：基于对数价格，使用全样本计算
+        - _calculate_beta()：基于收益率序列，用于波动率分析和风险评估
+        - _calculate_beta_from_prices()：基于对数价格序列，用于协整关系和价差构建
 
         与 _calculate_rolling_beta_from_prices() 的区别：
-        - _calculate_beta_from_prices()：使用传入序列的全部数据计算 Beta
-        - _calculate_rolling_beta_from_prices()：从传入序列的最后window个点计算 Beta
+        - _calculate_beta_from_prices()：使用传入序列的全部数据计算 Beta（全样本）
+        - _calculate_rolling_beta_from_prices()：从传入序列的最后 window 个点计算 Beta（滚动窗口）
+
+        应用场景：
+        - Z-score 计算：用于构建对数价差序列 spread = log(ALT) - β × log(BTC)
+        - 协整分析：评估价格序列的长期均衡关系
+        - 对冲比例：β 值反映价格层面的对冲比例
 
         Args:
             btc_prices: BTC 价格序列（pandas Series）
@@ -523,9 +543,10 @@ class DelayCorrelationAnalyzer:
             None: 如果计算失败
 
         Note:
-            - 使用对数价格可以消除价格量级差异
-            - 对数价格的线性关系更稳定，符合协整理论
-            - Z-score 计算使用此函数（数据已预先截取为window-1个点，无需滚动窗口函数）
+            - 使用对数价格可以消除价格量级差异（BTC 50000 vs ALT 0.01）
+            - 对数价格的线性关系更稳定，符合协整理论和配对交易实践
+            - Z-score 计算使用此函数（数据已预先截取为 window-1 个点，无需滚动窗口函数）
+            - 对数变换后 Beta 不等同于收益率 Beta，两者衡量不同维度的关系
         """
         # 1. 数据长度检查
         if len(btc_prices) != len(alt_prices):
@@ -555,7 +576,8 @@ class DelayCorrelationAnalyzer:
                 logger.debug(f"价格 Beta 计算失败：BTC 对数价格方差为 0 或 NaN{coin_info}")
                 return None
 
-            # 6. 计算 Beta
+            # 6. 计算 Beta 系数（基于对数价格）
+            # β = Cov(log_BTC, log_ALT) / Var(log_BTC)
             beta = covariance / btc_variance
 
             # 7. 检查结果有效性
@@ -575,19 +597,25 @@ class DelayCorrelationAnalyzer:
     def _calculate_rolling_beta_from_prices(btc_prices: pd.Series, alt_prices: pd.Series,
                                              window: int, coin: str = None) -> Optional[float]:
         """
-        基于滚动窗口计算 Beta 系数（用于 Z-score 计算）
+        基于滚动窗口计算 Beta 系数（用于动态 Z-score 计算）
 
-        使用最近 window 个数据点计算 Beta，与 Z-score 的均值和标准差计算窗口保持一致，
-        确保统计一致性。
+        使用最近 window 个数据点的对数价格计算 Beta 系数，与 Z-score 的均值和标准差
+        计算窗口保持一致，确保统计一致性和响应性。
+        公式：β = Cov(log_BTC[-window:], log_ALT[-window:]) / Var(log_BTC[-window:])
 
         与 _calculate_beta_from_prices() 的区别：
-        - _calculate_beta_from_prices()：使用全样本计算 Beta
-        - _calculate_rolling_beta_from_prices()：使用滚动窗口计算 Beta
+        - _calculate_beta_from_prices()：使用传入数据的全样本计算 Beta（适合已截取数据）
+        - _calculate_rolling_beta_from_prices()：从完整序列中提取最后 window 个点计算 Beta（适合滚动计算）
+
+        应用场景：
+        - 动态 Z-score：使用滚动窗口 Beta 反映近期价差关系变化
+        - 自适应对冲：Beta 随市场变化动态调整
+        - 实时监控：传入完整历史序列，自动提取最新窗口计算
 
         Args:
-            btc_prices: BTC 价格序列（pandas Series）
-            alt_prices: 山寨币价格序列（pandas Series）
-            window: 滚动窗口大小（应与 Z-score 窗口相同）
+            btc_prices: BTC 价格序列（pandas Series，完整历史数据）
+            alt_prices: 山寨币价格序列（pandas Series，完整历史数据）
+            window: 滚动窗口大小（应与 Z-score 窗口相同，通常 20-100）
             coin: 币种名称（可选，用于日志）
 
         Returns:
@@ -596,9 +624,9 @@ class DelayCorrelationAnalyzer:
 
         Note:
             - 使用对数价格可以消除价格量级差异
-            - 滚动窗口 Beta 能反映近期价差关系变化
-            - 此函数适用于：传入完整价格序列，需要从最后window个点计算Beta的场景
-            - 注意：如果数据已经预先截取为所需窗口大小，应使用 _calculate_beta_from_prices() 避免冗余的窗口截取
+            - 滚动窗口 Beta 比全样本 Beta 更能反映近期市场关系变化
+            - 此函数适用于：传入完整价格序列，需要从最后 window 个点计算 Beta 的场景
+            - 性能优化：如果数据已经预先截取为所需窗口大小，应使用 _calculate_beta_from_prices() 避免冗余的窗口截取
         """
         # 1. 数据长度检查
         if len(btc_prices) != len(alt_prices):
@@ -634,7 +662,8 @@ class DelayCorrelationAnalyzer:
                 logger.debug(f"滚动 Beta 计算失败：BTC 对数价格方差为 0 或 NaN{coin_info}")
                 return None
 
-            # 7. 计算 Beta
+            # 7. 计算 Beta 系数（基于滚动窗口的对数价格）
+            # β = Cov(log_BTC[-window:], log_ALT[-window:]) / Var(log_BTC[-window:])
             beta = covariance / btc_variance
 
             # 8. 检查结果有效性
@@ -692,6 +721,8 @@ class DelayCorrelationAnalyzer:
         """
         # ========== 双窗口策略实现 ==========
         # 1. 参数处理：beta_window 默认使用类属性 BETA_WINDOW
+        # Beta 系数（基于对数价格）使用长窗口，用于构建稳定的价差序列
+        # Z-score 统计量使用短窗口，提高对价格偏离的响应性
         if beta_window is None:
             beta_window = getattr(DelayCorrelationAnalyzer, 'BETA_WINDOW', window * 3)
         zscore_window = window
@@ -727,8 +758,10 @@ class DelayCorrelationAnalyzer:
             recent_btc_full = btc_prices.iloc[-data_window:]
             recent_alt_full = alt_prices.iloc[-data_window:]
 
-            # 5. Beta 计算（长窗口，保留 look-ahead bias 防护）
-            # 使用前 beta_window-1 个点计算 Beta，避免使用最后一个点的信息
+            # 5. Beta 系数计算（长窗口，基于对数价格）
+            # 使用前 beta_window-1 个点计算 Beta（避免 look-ahead bias）
+            # 公式：β = Cov(log_BTC, log_ALT) / Var(log_BTC)
+            # 用途：构建价差序列 spread = log(ALT) - β × log(BTC)
             beta_btc = recent_btc_full.iloc[:-1]
             beta_alt = recent_alt_full.iloc[:-1]
             rolling_beta = DelayCorrelationAnalyzer._calculate_beta_from_prices(
@@ -740,7 +773,8 @@ class DelayCorrelationAnalyzer:
                 return None
 
             # 6. 价差构建（短窗口）
-            # 取最近 zscore_window 期数据，使用长窗口计算的 Beta 构建价差
+            # 取最近 zscore_window 期数据，使用长窗口计算的 Beta 构建对数价差
+            # 价差公式：spread = log(ALT) - β × log(BTC)
             recent_btc = recent_btc_full.iloc[-zscore_window:]
             recent_alt = recent_alt_full.iloc[-zscore_window:]
             log_btc = np.log(recent_btc)
@@ -874,8 +908,10 @@ class DelayCorrelationAnalyzer:
             recent_btc_full = btc_prices.iloc[-data_window:]
             recent_alt_full = alt_prices.iloc[-data_window:]
 
-            # 5. Beta 计算（长窗口，保留 look-ahead bias 防护）
-            # 使用前 beta_window-1 个点计算 Beta，避免使用最后一个点的信息
+            # 5. Beta 系数计算（长窗口，基于对数价格）
+            # 使用前 beta_window-1 个点计算 Beta（避免 look-ahead bias）
+            # 公式：β = Cov(log_BTC, log_ALT) / Var(log_BTC)
+            # 用途：构建价差序列 spread = log(ALT) - β × log(BTC)
             beta_btc = recent_btc_full.iloc[:-1]
             beta_alt = recent_alt_full.iloc[:-1]
             rolling_beta = DelayCorrelationAnalyzer._calculate_beta_from_prices(
@@ -885,7 +921,8 @@ class DelayCorrelationAnalyzer:
                 return None, None, None
 
             # 6. 价差构建（短窗口）
-            # 取最近 zscore_window 期数据，使用长窗口计算的 Beta 构建价差
+            # 取最近 zscore_window 期数据，使用长窗口计算的 Beta 构建对数价差
+            # 价差公式：spread = log(ALT) - β × log(BTC)
             recent_btc = recent_btc_full.iloc[-zscore_window:]
             recent_alt = recent_alt_full.iloc[-zscore_window:]
             log_btc = np.log(recent_btc)
@@ -1140,14 +1177,18 @@ class DelayCorrelationAnalyzer:
             tau_star = 0
             max_related_matrix = np.nan
 
-        # ========== 4. 计算 Beta 系数（如果启用）==========
+        # ========== 4. 计算 Beta 收益率系数（如果启用）==========
+        # 基于收益率序列计算 Beta，衡量山寨币相对 BTC 的波动幅度
+        # 公式：β = Cov(BTC_returns, ALT_returns) / Var(BTC_returns)
         beta = None
         if enable_beta_calc:
             # 根据最优延迟选择数据对齐方式计算 Beta
-            # 如果最优延迟 > 0，使用延迟对齐后的数据，以反映真实的跟随关系
+            # 目的：确保 Beta 反映真实的跟随关系（考虑延迟效应）
+            # 如果最优延迟 > 0，使用延迟对齐后的数据
             # 如果最优延迟 = 0，使用同期数据
             if tau_star > 0:
                 # 使用最优延迟对齐后的数据：BTC[t] 与 ALT[t+tau_star]
+                # 对齐后计算的 Beta 反映考虑延迟的真实波动关系
                 btc_beta = btc_ret_processed[:-tau_star]
                 alt_beta = alt_ret_processed[tau_star:]
             else:
@@ -1367,8 +1408,10 @@ class DelayCorrelationAnalyzer:
         min_short_corr = min(short_term_corrs)
         max_long_corr = max(long_term_corrs)
         
-        # ========== Beta 系数检查 ==========
-        # 从 results 中提取所有有效的 beta 值
+        # ========== Beta 收益率系数检查 ==========
+        # 从 results 中提取所有有效的 Beta 收益率系数值
+        # Beta 收益率系数：基于收益率计算，衡量山寨币相对 BTC 的波动幅度
+        # 用于过滤波动不足的交易对（β < 阈值），确保有足够套利空间
         valid_betas = []
         for result in results:
             # 处理新旧格式兼容（5个值 vs 4个值）
@@ -1383,10 +1426,11 @@ class DelayCorrelationAnalyzer:
         # 如果启用了 Beta 计算且有有效的 Beta 值，进行阈值检查
         if self.ENABLE_BETA_CALCULATION and valid_betas:
             avg_beta = np.mean(valid_betas)
+            # β < 1.0 表示波动小于 BTC，套利空间受限，过滤该币种
             if avg_beta < self.AVG_BETA_THRESHOLD:
                 coin_info = f" | 币种: {coin}" if coin else ""
                 logger.info(
-                    f"Beta系数不满足要求，过滤 | 平均Beta: {avg_beta:.4f} < {self.AVG_BETA_THRESHOLD}"
+                    f"Beta收益率系数不满足要求，过滤 | 平均Beta: {avg_beta:.4f} < {self.AVG_BETA_THRESHOLD}"
                     f"{coin_info}"
                 )
                 return False, 0, min_short_corr, max_long_corr
@@ -1466,7 +1510,7 @@ class DelayCorrelationAnalyzer:
         """
         # 构建结果 DataFrame
         data_rows = []
-        has_beta = False  # 标记是否有有效的Beta值
+        has_beta = False  # 标记是否有有效的 Beta 收益率系数值
 
         for result in results:
             # 处理新旧格式兼容（5个值 vs 4个值）
@@ -1487,9 +1531,9 @@ class DelayCorrelationAnalyzer:
                 '最优延迟': ts
             }
 
-            # 添加 Beta 系数列（如果存在且有效）
+            # 添加 Beta 收益率系数列（如果存在且有效）
             if beta is not None and not np.isnan(beta):
-                row['Beta系数'] = beta
+                row['Beta收益率系数'] = beta
                 has_beta = True
 
             data_rows.append(row)
@@ -1502,15 +1546,15 @@ class DelayCorrelationAnalyzer:
         content = f"{self.exchange_name}\n\n{coin} 相关系数分析结果\n{df_results.to_string(index=False)}\n"
         content += f"\n相关系数差值: {diff_amount:.2f}"
 
-        # 如果有Beta信息，添加风险提示
+        # 如果有 Beta 收益率系数信息，添加风险提示
         if has_beta:
-            avg_beta = df_results['Beta系数'].mean() if 'Beta系数' in df_results.columns else None
+            avg_beta = df_results['Beta收益率系数'].mean() if 'Beta收益率系数' in df_results.columns else None
             if avg_beta is not None and avg_beta > 1.5:
                 content += f"\n⚠️ 高波动风险：平均Beta={avg_beta:.2f}（波动幅度是BTC的{avg_beta:.1f}倍）"
             elif avg_beta is not None and avg_beta > 1.2:
                 content += f"\n⚠️ 中等波动：平均Beta={avg_beta:.2f}"
             else:
-                content += f"\nBeta系数: {avg_beta:.2f}"
+                content += f"\nBeta收益率系数: {avg_beta:.2f}"
         
         # 如果有 Z-score 信息，根据平稳性等级添加信号强度提示
         if zscore is not None:
@@ -1703,7 +1747,7 @@ class DelayCorrelationAnalyzer:
                 price_data = price_data_cache[short_term_key]
 
                 # 使用增强版函数，同时获取 Z-score、平稳性等级和 p-value
-                # 双窗口策略：Beta 使用长窗口（BETA_WINDOW），统计量使用短窗口（ZSCORE_WINDOW）
+                # 双窗口策略：Beta（基于对数价格）使用长窗口（BETA_WINDOW）构建价差，统计量使用短窗口（ZSCORE_WINDOW）
                 zscore_result, stationarity_level_result, p_value_result = self._calculate_zscore_with_level(
                     price_data['btc_prices'],
                     price_data['alt_prices'],
