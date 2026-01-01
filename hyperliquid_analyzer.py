@@ -1435,13 +1435,13 @@ class DelayCorrelationAnalyzer:
                 )
                 return False, 0, min_short_corr, max_long_corr
         
-        diff_amount = 0
+        # 计算相关系数差值（长期最大相关系数 - 短期最小相关系数）
+        diff_amount = max_long_corr - min_short_corr
         is_anomaly = False
         
         # 长期相关系数大于阈值，且短期相关系数小于阈值的时候，才计算差值
         if max_long_corr > self.LONG_TERM_CORR_THRESHOLD and min_short_corr < self.SHORT_TERM_CORR_THRESHOLD:
             # 相关性差值大于阈值，则认为存在套利机会
-            diff_amount = max_long_corr - min_short_corr
             if diff_amount > self.CORR_DIFF_THRESHOLD:
                 is_anomaly = True
         # 长期相关系数大于阈值，且短期存在明显滞后时，则认为存在套利机会
