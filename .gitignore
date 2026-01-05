@@ -17,3 +17,5 @@ files/
 *.epub.bz2
 *.pdf.xz
 *.epub.xz
+logs/
+*.log
